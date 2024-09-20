@@ -100,10 +100,30 @@ impl fprobe::FprobeOperations for CommitCredsProbe {
     }
 }
 
+struct KallsymsLookupNameProbe;
+
+impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
+    fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
+        if let Err(_) = check_module_consistency(regs) {
+            pr_err!("Error while checking module consistency");
+        }
+        let pstr = regs.di as *const c_char;
+
+        let str = unsafe {CStr::from_char_ptr(pstr)};
+
+        pr_info!("kallsyms_lookup_name : looking up for {}", str);
+    }
+    fn exit_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+        
+    }
+}
+
+
 struct Probes {
     _usermodehelper_probe : Pin<Box<fprobe::Fprobe<UsermodehelperProbe>>>,
     _init_module_probe : Pin<Box<fprobe::Fprobe<SysInitModuleProbe>>>,
-    _commit_creds_probe : Pin<Box<fprobe::Fprobe<CommitCredsProbe>>>
+    _commit_creds_probe : Pin<Box<fprobe::Fprobe<CommitCredsProbe>>>,
+    _kallsyms_lookup_name_probe : Pin<Box<fprobe::Fprobe<KallsymsLookupNameProbe>>>
 }
 
 impl kernel::Module for Probes {
@@ -118,10 +138,13 @@ impl kernel::Module for Probes {
 
         let _commit_creds_probe = fprobe::Fprobe::new_pinned("commit_creds", None)?;
 
+        let _kallsyms_lookup_name_probe = fprobe::Fprobe::new_pinned("kallsyms_lookup_name", None)?;
+
         Ok(Probes { 
             _usermodehelper_probe,
             _init_module_probe,
             _commit_creds_probe,
+            _kallsyms_lookup_name_probe
         })
     }
 }
