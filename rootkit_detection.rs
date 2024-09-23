@@ -7,6 +7,8 @@ use core::result::Result::Ok;
 use core::slice;
 use core::str;
 
+use kernel::module::symbols_lookup_address;
+use kernel::module::symbols_lookup_name;
 use kernel::sync::Arc;
 
 use core::mem;
@@ -24,7 +26,8 @@ use kernel::module;
 
 /// The maximum number of byte we saved for a given function
 const MAX_SAVED_SIZE : usize = 4096;
-
+// The number of syscall on my computer
+const NB_SYCALLS : usize = 451;
 
 module! {
     type: RootkitDetection,
@@ -129,6 +132,47 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
     }
 }
 
+struct SyscallIntegrity;
+
+impl SyscallIntegrity {
+    fn init() -> Result<Self> {
+        Ok(SyscallIntegrity)
+    }
+
+    fn check_syscall_position(&self) -> Result {
+        pr_info!("Checking for syscalls table integrity\n");
+        let addr_sys_table = symbols_lookup_name(c_str!("sys_call_table"));
+
+        static_assert!(((NB_SYCALLS * mem::size_of::<bindings::sys_call_ptr_t>()) as u128) < (isize::MAX as u128));
+
+        // SAFETY : 
+        // 1- The object we manipulate is cthe sycall_table so it won't be deallocated
+        // 2- addr is non null and aligned 
+        // 3- from addr to addr+NB_SYSCALL the memory is valid and readable because it is the syscall_table
+        // 4- The slice is non mutable so it will not be mutated
+        // 5- NB_SYSCALLS * mem::size_of::<sys_call_ptr_t>() < isize::MAX
+        let sys_call_table = unsafe { slice::from_raw_parts(addr_sys_table as *const u64, NB_SYCALLS)};
+
+        for syscall in sys_call_table {
+            let mut offset = 0 as u64;
+            let mut symbolsize = 0 as u64;
+            let (modname, symbol) = symbols_lookup_address(*syscall, &mut offset, &mut symbolsize)?;
+            if let Some(modname) = modname {
+                let symbol_vec = match symbol {
+                    Some(symbol) => symbol,
+                    None => Vec::new()
+                };
+                let symbol_cstr = match symbol_vec.len() {
+                    0 => c_str!("unknown"),
+                    _ => CStr::from_bytes_with_nul(symbol_vec.as_slice())?
+                };
+                pr_alert!("Syscall {} hijacked by the module {}", symbol_cstr, CStr::from_bytes_with_nul(modname.as_slice())?);
+            }
+        }
+        Ok(())
+    }
+}
+
 struct FunctionIntegrity {
     saved_function : Vec<(String, Vec<u8>)>,
 }
@@ -207,16 +251,34 @@ impl FunctionIntegrity {
 
 }
 
+struct IntegrityCheck {
+    function_integ : FunctionIntegrity,
+    syscall_integ : SyscallIntegrity,
+}
+
 #[vtable]
-impl file::Operations for FunctionIntegrity {
+impl file::Operations for IntegrityCheck{
     type OpenData = Arc<Self>;
     fn open(context: &Self::OpenData, _file: &file::File) -> Result<Self::Data> {
-        if let Some(fct) = context.check_functions()? {
+        if let Some(fct) = context.function_integ.check_functions()? {
             pr_alert!("Function {} is hooked\n", fct);
         }
+
+        context.syscall_integ.check_syscall_position()?;
+
         Ok(())
     }
 }
+
+impl IntegrityCheck {
+    fn init() -> Result<Self> {
+        Ok(IntegrityCheck {
+            function_integ : FunctionIntegrity::init()?,
+            syscall_integ : SyscallIntegrity::init()?,
+        })
+    }
+}
+
 struct Probes {
     _usermodehelper_probe : Pin<Box<fprobe::Fprobe<UsermodehelperProbe>>>,
     _init_module_probe : Pin<Box<fprobe::Fprobe<SysInitModuleProbe>>>,
@@ -254,9 +316,9 @@ impl Drop for Probes {
 }
 
 struct RootkitDetection {
-    _registration : Pin<Box<Registration<FunctionIntegrity>>>,
+    _registration : Pin<Box<Registration<IntegrityCheck>>>,
     _probe : Probes,
-    _function_integrity : Arc<FunctionIntegrity>,
+    _integrity_check : Arc<IntegrityCheck>,
 }
 
 impl kernel::Module for RootkitDetection {
@@ -267,14 +329,14 @@ impl kernel::Module for RootkitDetection {
         
         let _probe = Probes::init()?;
 
-        let _function_integrity = Arc::try_new(FunctionIntegrity::init()?)?;
+        let _integrity_check = Arc::try_new(IntegrityCheck::init()?)?;
 
-        let _registration = kernel::miscdev::Registration::<FunctionIntegrity>::new_pinned(fmt!("{name}"), _function_integrity.clone())?;
+        let _registration = kernel::miscdev::Registration::<IntegrityCheck>::new_pinned(fmt!("{name}"), _integrity_check.clone())?;
     
         Ok(RootkitDetection {
             _registration,
             _probe,
-            _function_integrity,
+            _integrity_check,
         })
     }
 

@@ -30,6 +30,12 @@ This check don't work if the rootkit is already present at the loading of the mo
 Checked functions :
 - `ip_rcv`
 
+## Syscall table entries address position
+
+One of the privilieged way for LKM rootkit to alter it's environment is to hijack syscalls. The classical hooking method are possible (see above for details), but a more simple way to hook syscall is to modify the sycall table `sys_call_table`. 
+
+This check works by getting the `sys_call_table` address and iterating over all it's entry checking for the position of each address, if the address is situated in a module the syscall has been hijacked.
+
 # Rootkit tested and detected
 
 Reptile : https://github.com/f0rb1dd3n/Reptile
