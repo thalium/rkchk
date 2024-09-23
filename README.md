@@ -8,14 +8,14 @@ This module was designed to be used mostly on `x86_64` architecture, but some ch
 
 # Available checks
 
-## Module name presence in list
+## 1- Module name presence in list
 
 Many rootkit hide themselves from the module list (/proc/modules, lsmod ...) by removing themselves from the module list used by the kernel. 
 
 The module hook (using fprobe) many commonly used by LKM rootkit linux API function.
 The callback function get the caller ip and using `kallsyms_module` check if the caller is a module or not, and if so check if it's name is in the kernel's module list. An absent name is highly suspicious.
 
-## Function integrity
+## 2- Function integrity
 
 Many rootkit act on the system by hooking multiple function such as `ip_rcv` to hide communication and open backdoor (listen for magic packet for example). 
 
@@ -30,7 +30,7 @@ This check don't work if the rootkit is already present at the loading of the mo
 Checked functions :
 - `ip_rcv`
 
-## Syscall table entries address position
+## 3- Syscall table entries address position
 
 One of the privilieged way for LKM rootkit to alter it's environment is to hijack syscalls. The classical hooking method are possible (see above for details), but a more simple way to hook syscall is to modify the sycall table `sys_call_table`. 
 
@@ -40,3 +40,10 @@ This check works by getting the `sys_call_table` address and iterating over all 
 
 Reptile : https://github.com/f0rb1dd3n/Reptile
 Diamorphine : https://github.com/m0nad/Diamorphine
+# reveng_rtkit 
+
+Source : https://github.com/reveng007/reveng_rtkit
+
+Detected by 1- and 3- 
+
+
