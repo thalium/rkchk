@@ -29,6 +29,9 @@ const MAX_SAVED_SIZE : usize = 4096;
 // The number of syscall on my computer
 const NB_SYCALLS : usize = 451;
 
+const NAME_LOOKUP: [&str; 12] = ["module_tree_insert", "module_tree_remove", "module_mutex", "sys_call_table", "__x64_sys_init_module", "sys_kill", "vfs_read", "__x64_sys_kill",  "__x64_sys_getdents", "__x64_sys_getdents64", "tcp6_seq_show", "tcp4_seq_show"];
+
+
 module! {
     type: RootkitDetection,
     name: "rootkit_detection",
@@ -36,6 +39,8 @@ module! {
     description: "Rust rootkit detection module",
     license: "GPL",
 }
+
+
 
 struct SysInitModuleProbe;
 impl fprobe::FprobeOperations for SysInitModuleProbe {
@@ -47,7 +52,7 @@ impl fprobe::FprobeOperations for SysInitModuleProbe {
     } 
 }
 
-fn check_module_consistency(regs : &bindings::pt_regs) -> Result {
+fn check_module_consistency(regs : &bindings::pt_regs) -> Result<Option<()>> {
     let sp = regs.sp as *const u64;
 
     // Parent ip
@@ -62,24 +67,24 @@ fn check_module_consistency(regs : &bindings::pt_regs) -> Result {
     let (modname, symbol) = module::symbols_lookup_address(pip, &mut offset, &mut _symbolsize)?;
 
     if let Some(name) = modname {
-        pr_info!("Module source : {}\n", CStr::from_bytes_with_nul(name.as_slice())?);
-        if let Some(symbol) = symbol {
-            pr_info!("Symbol info : {}+{}\n", CStr::from_bytes_with_nul(symbol.as_slice())?, offset);
-        }
+        
         if !is_module(CStr::from_bytes_with_nul(name.as_slice())?) {
             pr_alert!("Suspicious activity : module name [{}] not in module list\n", CStr::from_bytes_with_nul(name.as_slice())?);
+            if let Some(symbol) = symbol {
+                pr_info!("Calling function : {}+{} [{}]\n", CStr::from_bytes_with_nul(symbol.as_slice())?, offset, CStr::from_bytes_with_nul(name.as_slice())?);
+            }
+            return Ok(Some(()));
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 struct UsermodehelperProbe;
 
 impl fprobe::FprobeOperations for UsermodehelperProbe {
-    fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, _regs: &bindings::pt_regs) {
-        pr_info!("We entered `call_usermodehelper`\n");
-        let pstr = _regs.di as *const c_char;
+    fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
+        let pstr = regs.di as *const c_char;
         
         if pstr == 0 as *const i8 {
             return;
@@ -90,14 +95,18 @@ impl fprobe::FprobeOperations for UsermodehelperProbe {
 
         pr_info!("Executing the program : {}\n", prog);
 
-        if let Err(_) = check_module_consistency(_regs) {
-            pr_err!("Error while checking module consistency");
-        }
+        match check_module_consistency(regs) {
+            Err(_) => {
+                pr_err!("Error while checking module consistency");
+                return;
+            }
+            Ok(Some(())) => pr_alert!("Called function : commit_creds"),
+            _ => (),
+        };
 
     }
 
     fn exit_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, _regs: &bindings::pt_regs) {
-        pr_info!("We exited `call_usermodehelper`\n");
     }
 }
 
@@ -105,9 +114,14 @@ struct CommitCredsProbe;
 
 impl fprobe::FprobeOperations for CommitCredsProbe {
     fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        if let Err(_) = check_module_consistency(regs) {
-            pr_err!("Error while checking module consistency");
-        }
+        match check_module_consistency(regs) {
+            Err(_) => {
+                pr_err!("Error while checking module consistency");
+                return;
+            }
+            Ok(Some(())) => pr_alert!("Called function : commit_creds"),
+            _ => (),
+        };
     }
     fn exit_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, _regs: &bindings::pt_regs) {
         
@@ -118,14 +132,24 @@ struct KallsymsLookupNameProbe;
 
 impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
     fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        if let Err(_) = check_module_consistency(regs) {
-            pr_err!("Error while checking module consistency");
-        }
+        match check_module_consistency(regs) {
+            Err(_) => {
+                pr_err!("Error while checking module consistency");
+                return;
+            }
+            Ok(Some(())) => pr_alert!("Called function : kallsyms_lookup_name"),
+            _ => (),
+        };
         let pstr = regs.di as *const c_char;
 
         let str = unsafe {CStr::from_char_ptr(pstr)};
 
-        pr_info!("kallsyms_lookup_name : looking up for {}", str);
+        for fct in NAME_LOOKUP.iter() {
+            if (*fct).as_bytes() == str.as_bytes() {
+                pr_alert!("kallsyms_lookup_name : looking up for suspicious function : {}", str);
+                break;
+            }
+        }
     }
     fn exit_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, _regs: &bindings::pt_regs) {
         
