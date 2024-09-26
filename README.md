@@ -42,6 +42,29 @@ Created a list of symbol which are often used by rootkit (for the moment using o
 
 By hooking `kallsyms_lookup_name` we can get it's argument `name` and see if it is in the list of suspicious symbol.
 
+## 5 - Control register pinned bits
+
+Some rootkit unset some of the bits in the controls registers CR0 and CR4 to give themselves more freedom. 
+A check that can be done is to look to the commonly attacked bits that should be set. 
+However most of the time the rootkit set them back when they don't need them unset anymore.
+
+The checked bits are:
+- CR0:WP : Write Protect prevent the CPU to write read only page in ring 0. This bits is unset often to write to the `.rodata` section of the kernel (for example to the `sys_call_table`). This is used by the Diamorphine rootkit.
+- CR4:UMIP : Block the usage of some instruction in user mode. Might be used by some rootkit to allow userspace program to have more freedom.
+- CR4:SMEP / CR4:SMAP : Generate a fault in case of execution of code and data access to page in userspace.
+
+## 6 - MSR LSTAR
+
+A way to hijack the execution flow of the kernel is to modify the LSTAR register which controll the address to jump to when a syscall is triggered.
+
+In the `syscall_init` the LSTAR register (used in x86_64's long mode) is set to the symbol `entry_SYSCALL_64` : 
+
+```C
+wrmsrl(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
+```
+
+So we check that the address stored in the register still coreespond to the same symbol.
+
 # Rootkit tested and detected
 
 ### Reptile : 
