@@ -27,8 +27,14 @@ This check work by reading the text of multiple commonly hooked function (see th
 
 This check don't work if the rootkit is already present at the loading of the module.
 
-Checked functions :
-- `ip_rcv`
+Checked functions (choosen by reading code of rootkit using the method described):
+- `ip_rcv` (used by Reptile)
+- `tcp4_seq_show` 
+- `sys_getdents` (used by Reptile, BDS Ftrace)
+- `sys_getdents64` (used by Reptile, BDS Ftrace)
+- `sys_kill` (used by Reptile)
+
+
 
 ## 3- Syscall table entries address position
 

@@ -32,7 +32,7 @@ const NB_SYCALLS : usize = 332;
 /// `kallsyms_lookup_name` symbol black list
 const NAME_LOOKUP: [&str; 12] = ["module_tree_insert", "module_tree_remove", "module_mutex", "sys_call_table", "__x64_sys_init_module", "sys_kill", "vfs_read", "__x64_sys_kill",  "__x64_sys_getdents", "__x64_sys_getdents64", "tcp6_seq_show", "tcp4_seq_show"];
 
-/// Write Protect : the CPU cannot read ro page in ring 0
+/// Write Protect : the CPU cannot write ro page in ring 0
 const CR0_WP : u64 = 1 << 16;
 /// User-Mode Instruction Prevention : block the usage of some instructions in user mode
 const CR4_UMIP : u64 = 1 << 16;
@@ -301,6 +301,10 @@ impl FunctionIntegrity {
         };
 
         fct_integ.save_function(c_str!("ip_rcv"))?;
+        fct_integ.save_function(c_str!("tcp4_seq_show"))?;
+        fct_integ.save_function(c_str!("__x64_sys_getdents"))?;
+        fct_integ.save_function(c_str!("__x64_sys_getdents64"))?;
+        fct_integ.save_function(c_str!("__x64_sys_kill"))?;
 
         Ok(fct_integ)
     }
@@ -367,7 +371,6 @@ impl FunctionIntegrity {
        }
        Ok(None)
     }
-
 }
 
 struct IntegrityCheck {
