@@ -23,7 +23,7 @@ Other commonly hooked function is `sys_kill`, often used as a way of communicati
 
 Some rootkit have their own framework to hook thoses function (for example `khook` for Reptile) and work by modifying the code of the hooked function to modify their flow of execution.
 
-This check work by reading the text of multiple commonly hooked function (see the list given after) as loading and regulary checking the integrity of the function.
+This check work by calculating the hash of the text of multiple commonly hooked function (see the list given after) at loading and regulary checking the integrity of the function.
 
 This check don't work if the rootkit is already present at the loading of the module.
 

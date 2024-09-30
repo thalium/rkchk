@@ -2,7 +2,15 @@
 
 //! Rust character device sample.
 
+pub mod fx_hash;
+
+use fx_hash::FxHasher;
+use core::hash;
+use core::hash::Hash;
+
+use core::default::Default;
 use core::ffi::c_char;
+use core::hash::Hasher;
 use core::result::Result::Ok;
 use core::slice;
 use core::str;
@@ -23,6 +31,7 @@ use kernel::str::CStr;
 use kernel::prelude::*;
 use kernel::fprobe;
 use kernel::module;
+
 
 /// The maximum number of byte we saved for a given function
 const MAX_SAVED_SIZE : usize = 4096;
@@ -290,7 +299,7 @@ impl SyscallIntegrity {
 }
 
 struct FunctionIntegrity {
-    saved_function : Vec<(String, Vec<u8>)>,
+    saved_function : Vec<(String, u64)>,
 }
 
 impl FunctionIntegrity {
@@ -309,9 +318,9 @@ impl FunctionIntegrity {
         Ok(fct_integ)
     }
 
-    /// Get the bytes of the text the function `name`
-    /// Return at max the MAX_SAVED_SIZE first bytes
-    fn get_function_as_bytes(&self, name : &CStr) -> Result<Vec<u8>> {
+    /// Return the hash calculated off the text's byte of the function
+    /// Calculate the hash from at max the MAX_SAVED_SIZE first bytes
+    fn get_function_hash(&self, name : &CStr) -> Result<u64> {
         let addr = module::symbols_lookup_name(name);
 
         if addr == 0 as u64 {
@@ -338,23 +347,25 @@ impl FunctionIntegrity {
         // 5- symbolsize <= MAX_SAVED_SIZE < mem::size_of::<u8>() * isize::MAX
         let tab : &[u8] = unsafe { slice::from_raw_parts(addr as *const u8, symbolsize as usize)};
 
-        let mut buffer = Vec::try_with_capacity(symbolsize)?;
-        buffer.try_extend_from_slice(tab)?;
+        let mut hasher = fx_hash::FxHasher::default();
 
-        Ok(buffer)
+        tab.hash(&mut hasher);
+
+        Ok(hasher.finish())
     }
 
     /// Save the function's text bytes in the struct's `saved_function` field
     fn save_function(&mut self, name : &CStr) -> Result {
-        let buffer = self.get_function_as_bytes(name)?;
+        let hash = self.get_function_as_bytes(name)?;
 
+        // Converting &Cstr to String (kind of a pain)
         let mut name_buf : Vec<u8> = Vec::try_with_capacity(name.len())?;
         name_buf.try_extend_from_slice(name.as_bytes_with_nul())?;
         let name = match String::from_utf8(name_buf) {
             Ok(name) => name,
             Err(_) => return Err(EINVAL)
         };
-    
+
         self.saved_function.try_push((name, buffer))?;
 
         Ok(())
@@ -363,9 +374,9 @@ impl FunctionIntegrity {
     /// Iter through all the saved functions
     /// Get the current text bytes and compare it to the saved text byte
     fn check_functions<'a>(&'a self) -> Result<Option<&'a String>> {
-        for (name, bytes) in &self.saved_function {
-            let new_bytes = self.get_function_as_bytes(CStr::from_bytes_with_nul(name.as_bytes())?)?;
-            if new_bytes != *bytes {
+        for (name, hash) in &self.saved_function {
+            let new_hash = self.get_function_hash(CStr::from_bytes_with_nul(name.as_bytes())?)?;
+            if new_hash != *hash {
                 return Ok(Some(name));
             }
        }
