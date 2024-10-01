@@ -29,7 +29,7 @@ This check don't work if the rootkit is already present at the loading of the mo
 
 Checked functions (choosen by reading code of rootkit using the method described):
 - `ip_rcv` (used by Reptile)
-- `tcp4_seq_show` 
+- `tcp4_seq_show` (used by Reptile)
 - `sys_getdents` (used by Reptile, BDS Ftrace)
 - `sys_getdents64` (used by Reptile, BDS Ftrace)
 - `sys_kill` (used by Reptile)
@@ -71,6 +71,19 @@ wrmsrl(MSR_LSTAR, (unsigned long)entry_SYSCALL_64);
 
 So we check that the address stored in the register still coreespond to the same symbol.
 
+
+## 7 - Custom hooking
+
+Some rootkit, in order to alter the control flow of the kernel, hook on interzesting function using custom hooking framework. Those framework often involve placing a breakpoint (opcode `0xCC`) or a jump (opcode `0xE9`) at the begining of the hooked function. 
+
+This check disassemble the first instruction of choosen functions (using the in kernel disassembler) to see if it's not a jump or a breakpoint. Therefor we can analyze if a function has been hooked even if the checker is loaded after the rootkit.
+
+Function checked : 
+- `ip_rcv` (used by Reptile)
+- `tcp4_seq_show` (used by Reptile)
+
+
+
 # Rootkit tested and detected
 
 ### Reptile : 
@@ -91,4 +104,4 @@ Detected by 1- and 3-
 
 Source : https://gitlab.hades.lan/t026/reptile
 
-Detected by 3- and 4-
+Detected by 3, 4, 7

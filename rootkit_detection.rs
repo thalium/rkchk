@@ -4,8 +4,6 @@
 
 pub mod fx_hash;
 
-use fx_hash::FxHasher;
-use core::hash;
 use core::hash::Hash;
 
 use core::default::Default;
@@ -31,7 +29,7 @@ use kernel::str::CStr;
 use kernel::prelude::*;
 use kernel::fprobe;
 use kernel::module;
-
+use kernel::insn;
 
 /// The maximum number of byte we saved for a given function
 const MAX_SAVED_SIZE : usize = 4096;
@@ -49,6 +47,13 @@ const CR4_UMIP : u64 = 1 << 16;
 const CR4_SMEP : u64 = 1 << 20;
 /// Supervisor Mode Access Prevention Enable
 const CR4_SMAP : u64 = 1 << 21;
+
+/// Some x86 opcode
+
+/// Jump
+const X86_OP_JMP : i32 = 0xE9;
+/// Breakpoint
+const X86_OP_BP : i32 = 0xCC;
 
 module! {
     type: RootkitDetection,
@@ -356,7 +361,7 @@ impl FunctionIntegrity {
 
     /// Save the function's text bytes in the struct's `saved_function` field
     fn save_function(&mut self, name : &CStr) -> Result {
-        let hash = self.get_function_as_bytes(name)?;
+        let hash = self.get_function_hash(name)?;
 
         // Converting &Cstr to String (kind of a pain)
         let mut name_buf : Vec<u8> = Vec::try_with_capacity(name.len())?;
@@ -366,7 +371,7 @@ impl FunctionIntegrity {
             Err(_) => return Err(EINVAL)
         };
 
-        self.saved_function.try_push((name, buffer))?;
+        self.saved_function.try_push((name, hash))?;
 
         Ok(())
     }
@@ -374,6 +379,7 @@ impl FunctionIntegrity {
     /// Iter through all the saved functions
     /// Get the current text bytes and compare it to the saved text byte
     fn check_functions<'a>(&'a self) -> Result<Option<&'a String>> {
+        pr_info!("Checking for function integrity\n");
         for (name, hash) in &self.saved_function {
             let new_hash = self.get_function_hash(CStr::from_bytes_with_nul(name.as_bytes())?)?;
             if new_hash != *hash {
@@ -384,11 +390,59 @@ impl FunctionIntegrity {
     }
 }
 
+struct CFIntegrity {
+    checked_function : Vec<&'static CStr>
+}
+
+impl CFIntegrity {
+    /// Create a new instance of the structure
+    fn init() -> Result<Self> {
+        let mut checked_function = Vec::new();
+        checked_function.try_push(c_str!("ip_rcv"))?;
+        checked_function.try_push(c_str!("tcp4_seq_show"))?;
+        Ok(CFIntegrity {
+            checked_function
+        })
+
+    }
+
+    /// Check the first instruction of the function "name" to see if it isn't hooked.
+    /// The check consist to see if this instruction isn't a breakpoint or a jump
+    fn check_custom_hook(&self) -> Result {
+        pr_info!("Checking for custom hook\n");
+        for fct_name in &self.checked_function {
+            let addr = module::symbols_lookup_name(fct_name);
+                    
+            // SAFETY : 
+            // 1- The object we manipulate is code so it should not be deallocated, except if the module we look at is unloaded (TODO : find a way to ensure that the module is not unloaded)
+            // 2- addr is non null and aligned (because we ask for 1 byte data)
+            // 3- We assume that from addr to addr+15 the memory is valid and readable (the disassembler should read only one instruction and nothing more so it isn't a problem)
+            // 4- The slice is non mutable so it will not be mutated
+            // 5- 15 < mem::size_of::<u8>() * isize::MAX
+            let tab : &[u8] = unsafe { slice::from_raw_parts(addr as *const u8, 15 as usize)};
+            
+            let mut diss = insn::Insn::new(tab);
+
+            let opcode = diss.get_opcode()?;
+
+            if opcode == X86_OP_BP 
+            || opcode == X86_OP_JMP {
+                pr_alert!("Function : {} probably hooked using opcode {:#02x}\n", fct_name, opcode);
+            }
+        }
+        Ok(())
+    }
+}
+    
+
 struct IntegrityCheck {
     function_integ : FunctionIntegrity,
     syscall_integ : SyscallIntegrity,
     msr_integ : MSRIntegrity,
+    cf_integ : CFIntegrity,
 }
+
+
 
 #[vtable]
 impl file::Operations for IntegrityCheck{
@@ -403,6 +457,8 @@ impl file::Operations for IntegrityCheck{
         context.msr_integ.check_pinned_cr_bits()?;
         context.msr_integ.check_msr_lstar()?;
 
+        context.cf_integ.check_custom_hook()?;
+
         Ok(())
     }
 }
@@ -413,6 +469,7 @@ impl IntegrityCheck {
             function_integ : FunctionIntegrity::init()?,
             syscall_integ : SyscallIntegrity::init()?,
             msr_integ : MSRIntegrity::init()?,
+            cf_integ : CFIntegrity::init()?,
         })
     }
 }
