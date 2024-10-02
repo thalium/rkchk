@@ -15,6 +15,10 @@ Many rootkit hide themselves from the module list (/proc/modules, lsmod ...) by 
 The module hook (using fprobe) many commonly used by LKM rootkit linux API function.
 The callback function get the caller ip and using `kallsyms_module` check if the caller is a module or not, and if so check if it's name is in the kernel's module list. An absent name is highly suspicious.
 
+## 1.1 - Calling address in kernel space
+
+If the precedent code don't find a module name associated with the address of the caller, we check that this address is in kernel text, if not the calling address is suspicious because neither in kernel text nor module text.
+
 ## 2- Function integrity
 
 Many rootkit act on the system by hooking multiple function such as `ip_rcv` to hide communication and open backdoor (listen for magic packet for example). 

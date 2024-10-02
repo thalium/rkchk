@@ -13,6 +13,7 @@ use core::result::Result::Ok;
 use core::slice;
 use core::str;
 
+use kernel::module::is_kernel;
 use kernel::module::symbols_lookup_address;
 use kernel::module::symbols_lookup_name;
 use kernel::sync::Arc;
@@ -100,6 +101,12 @@ fn check_module_consistency(regs : &bindings::pt_regs) -> Result<Option<()>> {
             if let Some(symbol) = symbol {
                 pr_info!("Calling function : {}+{} [{}]\n", CStr::from_bytes_with_nul(symbol.as_slice())?, offset, CStr::from_bytes_with_nul(name.as_slice())?);
             }
+            return Ok(Some(()));
+        }
+    }
+    else {
+        if !is_kernel(pip) {
+            pr_alert!("Suspicious activity : calling address neither in module address space or kernel address space.\n");
             return Ok(Some(()));
         }
     }
