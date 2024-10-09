@@ -14,7 +14,6 @@ use core::slice;
 use core::str;
 
 use kernel::module::is_kernel;
-use kernel::module::symbols_lookup_address;
 use kernel::module::symbols_lookup_name;
 use kernel::sync::Arc;
 
@@ -76,11 +75,46 @@ impl fprobe::FprobeOperations for SysInitModuleProbe {
     } 
 }
 
+
+/// Run a series of test to check if the address come from a normal space
+/// 1 - Check if it ome from a module, if yes get the module name (use the mod_tree struct in the kernel)
+/// 2 - If it has a module name, check that it's in the linked list of module : 
+///     many rootkit remove themselves from the linked list but not from the mod tree 
+/// 3 - If a module name wasn't found check that it come from the kernel executable
+/// # Return :
+/// In case of an Ok return :
+///     Some(()) => an inconsistency was found
+///     None => everything is fine 
+fn check_address_consistency(addr : u64) -> Result<Option<()>>{
+
+    let mut offset : u64 = 0;
+    let mut _symbolsize : u64 = 0;
+
+    let (modname, symbol) = module::symbols_lookup_address(addr, &mut offset, &mut _symbolsize)?;
+
+    if let Some(name) = modname {
+        
+        if !is_module(CStr::from_bytes_with_nul(name.as_slice())?) {
+            pr_alert!("While checking address : {:#016x}\nSuspicious activity : module name [{}] not in module list\n",addr, CStr::from_bytes_with_nul(name.as_slice())?);
+            if let Some(symbol) = symbol {
+                pr_info!("Address's function : {}+{} [{}]\n", CStr::from_bytes_with_nul(symbol.as_slice())?, offset, CStr::from_bytes_with_nul(name.as_slice())?);
+            }
+            return Ok(Some(()));
+        }
+    }
+    else {
+        if !is_kernel(addr) {
+            pr_alert!("Suspicious activity : address neither in module address space or kernel address space.\n");
+            return Ok(Some(()));
+        }
+    }
+
+    Ok(None)
+}
+
 /// Get the parent ip (the ip of the calling function)
-/// Get the name of the module this address is in (if not it mean it's probably in kernel text and abort)
-/// Check that this module is in the linked list of module
-/// If not, it mean that the module removed itself from it which is suspicious 
-fn check_module_consistency(regs : &bindings::pt_regs) -> Result<Option<()>> {
+/// Check this address with the `check_address_consistency` function
+fn check_caller_consistency(regs : &bindings::pt_regs) -> Result<Option<()>> {
     let sp = regs.sp as *const u64;
 
     // Parent ip
@@ -89,29 +123,7 @@ fn check_module_consistency(regs : &bindings::pt_regs) -> Result<Option<()>> {
         *sp
     };
 
-    let mut offset : u64 = 0;
-    let mut _symbolsize : u64 = 0;
-
-    let (modname, symbol) = module::symbols_lookup_address(pip, &mut offset, &mut _symbolsize)?;
-
-    if let Some(name) = modname {
-        
-        if !is_module(CStr::from_bytes_with_nul(name.as_slice())?) {
-            pr_alert!("Suspicious activity : module name [{}] not in module list\n", CStr::from_bytes_with_nul(name.as_slice())?);
-            if let Some(symbol) = symbol {
-                pr_info!("Calling function : {}+{} [{}]\n", CStr::from_bytes_with_nul(symbol.as_slice())?, offset, CStr::from_bytes_with_nul(name.as_slice())?);
-            }
-            return Ok(Some(()));
-        }
-    }
-    else {
-        if !is_kernel(pip) {
-            pr_alert!("Suspicious activity : calling address neither in module address space or kernel address space.\n");
-            return Ok(Some(()));
-        }
-    }
-
-    Ok(None)
+    check_address_consistency(pip) 
 }
 
 struct UsermodehelperProbe;
@@ -130,7 +142,7 @@ impl fprobe::FprobeOperations for UsermodehelperProbe {
 
         pr_info!("Executing the program : {}\n", prog);
 
-        match check_module_consistency(regs) {
+        match check_caller_consistency(regs) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
                 return;
@@ -150,7 +162,7 @@ struct CommitCredsProbe;
 impl fprobe::FprobeOperations for CommitCredsProbe {
     /// Check only the module consistency
     fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        match check_module_consistency(regs) {
+        match check_caller_consistency(regs) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
                 return;
@@ -170,7 +182,7 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
     /// Check the module consistency
     /// Check that the symbol looked up for is in the blacklist or not
     fn entry_handler(_fprobe : &fprobe::Fprobe<Self>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        match check_module_consistency(regs) {
+        match check_caller_consistency(regs) {
             Err(_) => {
                 pr_err!("Error while checking module consistency");
                 return;
@@ -291,7 +303,11 @@ impl SyscallIntegrity {
         let sys_call_table = unsafe { slice::from_raw_parts(addr_sys_table as *const u64, NB_SYCALLS)};
 
         for syscall in sys_call_table {
-            let mut offset = 0 as u64;
+            let res = check_address_consistency(*syscall)?;
+            if let Some(()) = res {
+                pr_alert!("Syscall table entry hijacked\n");
+            }
+            /*let mut offset = 0 as u64;
             let mut symbolsize = 0 as u64;
             let (modname, symbol) = symbols_lookup_address(*syscall, &mut offset, &mut symbolsize)?;
             if let Some(modname) = modname {
@@ -304,7 +320,8 @@ impl SyscallIntegrity {
                     _ => CStr::from_bytes_with_nul(symbol_vec.as_slice())?
                 };
                 pr_alert!("Syscall {} hijacked by the module {}", symbol_cstr, CStr::from_bytes_with_nul(modname.as_slice())?);
-            }
+            }*/
+            
         }
         Ok(())
     }

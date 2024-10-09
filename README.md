@@ -90,6 +90,8 @@ Function checked :
 
 # Rootkit tested and detected
 
+## LKM Rootkits :
+
 ### Reptile : 
 
 Source : https://github.com/f0rb1dd3n/Reptile
@@ -98,14 +100,51 @@ Source : https://github.com/f0rb1dd3n/Reptile
 
 Source : https://github.com/m0nad/Diamorphine
 
+#### Detection :
+    1 / 3 / 4
+
 ### reveng_rtkit 
 
 Source : https://github.com/reveng007/reveng_rtkit
 
-Detected by 1- and 3- 
+#### Detection :
+    1 / 3 / 4
 
 ### Reptile improved :
 
 Source : https://gitlab.hades.lan/t026/reptile
 
-Detected by 3, 4, 7
+#### Detection :
+If loaded after rkchk :
+    1-1 / 2 / 7
+If loaded before rkchk :
+    1-1 / 7
+
+## eBPF rootkits
+
+### TripleCross
+
+Source : https://github.com/h3xduck/TripleCross
+
+#### Result : 
+
+The rootkit don't load because of a failed check during the verifying process : 
+```
+361: (07) r2 += 64                    ; R2_w=pkt(off=64,r=54,imm=0)
+362: (67) r2 <<= 32
+R2 pointer arithmetic with <<= operator prohibited
+```
+I suppose that it's because the verifier became stricter since the version of the kernel the module has been made for. (5.11)
+
+### ebpfkit
+
+Source : https://github.com/Gui774ume/ebpfkit
+
+#### Result :
+
+The rootkit don't load because of a failed check during the verifying process : 
+```
+5401: (6b) *(u16 *)(r3 +0) = r1
+R3 offset is outside of the packet
+```
+Same as before.
