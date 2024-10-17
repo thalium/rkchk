@@ -7,13 +7,16 @@ use core::hash::Hash;
 use core::default::Default;
 use core::ffi::c_char;
 use core::hash::Hasher;
+use core::iter::Iterator;
 use core::result::Result::Err;
 use core::result::Result::Ok;
 use core::slice;
 use core::str;
 
 use event::Events;
+use event::IndirectCallHijackInfo;
 use event::LoadedLKMInfo;
+use event::ModuleInfo;
 use kernel::fprobe::FprobeOperations;
 use kernel::module::is_kernel;
 use kernel::module::symbols_lookup_name;
@@ -90,13 +93,52 @@ module! {
     license: "GPL",
 }
 
-struct SysInitModuleProbe;
-impl fprobe::FprobeOperations for SysInitModuleProbe {
-    fn entry_handler(_fprobe: (), _entry_ip: usize, _regs: &bindings::pt_regs) {
-        pr_info!("We entered `__x64_sys_init_module`\n");
+struct EventStack {
+    wait_queue: Pin<Box<CondVar>>,
+    event_stack: Pin<Box<SpinLock<Vec<Events>>>>,
+}
+
+impl EventStack {
+    fn init() -> Result<Arc<Self>> {
+        // SAFETY : CondVar::init() is called below
+        let mut wait_queue = Box::into_pin(Box::try_new(unsafe { CondVar::new() })?);
+        kernel::condvar_init!(wait_queue.as_mut(), "data queue");
+
+        // Create a Spiinlock for the event_stack field because we can be called from everywhere
+        // so we shouldn't block like a mutex/semaphore do.
+        // SAFETY : `spinlock_init` is called below
+        let event_stack = unsafe { SpinLock::new(Vec::new()) };
+
+        let mut event_stack = Box::into_pin(Box::try_new(event_stack)?);
+        kernel::spinlock_init!(event_stack.as_mut(), "event stack");
+
+        Arc::try_new(EventStack {
+            wait_queue,
+            event_stack,
+        })
     }
-    fn exit_handler(_fprobe: (), _entry_ip: usize, _regs: &bindings::pt_regs) {
-        pr_info!("We exited `__x64_sys_init_module`\n");
+
+    fn push_event(&self, event: event::Events) -> Result<()> {
+        self.event_stack.lock().try_push(event)?;
+
+        self.wait_queue.notify_all();
+
+        Ok(())
+    }
+
+    fn wait_events(&self) -> Result<event::Events> {
+        let mut lock = self.event_stack.lock();
+        while lock.is_empty() {
+            if self.wait_queue.wait(&mut lock) {
+                return Err(EINTR);
+            }
+        }
+        // If we could make a while let with an else let statment this situation won't exist,
+        // We cannot get the None option of this match but anyway
+        match lock.pop() {
+            Some(event) => Ok(event),
+            None => Err(EAGAIN),
+        }
     }
 }
 
@@ -109,13 +151,22 @@ impl fprobe::FprobeOperations for SysInitModuleProbe {
 /// In case of an Ok return :
 ///     Some(()) => an inconsistency was found
 ///     None => everything is fine
-fn check_address_consistency(addr: u64) -> Result<Option<bool>> {
+fn check_address_consistency(addr: u64) -> Result<Option<event::Events>> {
     let mut offset: u64 = 0;
     let mut _symbolsize: u64 = 0;
 
-    let (modname, symbol) = module::symbols_lookup_address(addr, &mut offset, &mut _symbolsize)?;
+    let (modname, symbol): (Option<Vec<u8>>, Option<Vec<u8>>) =
+        module::symbols_lookup_address(addr, &mut offset, &mut _symbolsize)?;
 
     if let Some(name) = modname {
+        let mut buf = [0 as u8; event::MODULE_NAME_SIZE];
+        for (i, e) in name.iter().enumerate() {
+            let b = match buf.get_mut(i) {
+                None => break,
+                Some(b) => b,
+            };
+            *b = *e;
+        }
         if !is_module(CStr::from_bytes_with_nul(name.as_slice())?) {
             pr_alert!("While checking address : {:#016x}\nSuspicious activity : module name [{}] not in module list\n",addr, CStr::from_bytes_with_nul(name.as_slice())?);
             if let Some(symbol) = symbol {
@@ -126,13 +177,16 @@ fn check_address_consistency(addr: u64) -> Result<Option<bool>> {
                     CStr::from_bytes_with_nul(name.as_slice())?
                 );
             }
-            return Ok(Some(true));
+
+            let event = event::Events::ModuleInconsistency(ModuleInfo { name: buf });
+            return Ok(Some(event));
         }
-        Ok(Some(false))
+        let event = event::Events::ModuleAddress(ModuleInfo { name: buf });
+        Ok(Some(event))
     } else {
         if !is_kernel(addr) {
             pr_alert!("Suspicious activity : address neither in module address space or kernel address space.\n");
-            return Ok(Some(true));
+            return Ok(Some(event::Events::HiddenModule));
         }
         Ok(None)
     }
@@ -140,21 +194,25 @@ fn check_address_consistency(addr: u64) -> Result<Option<bool>> {
 
 /// Get the parent ip (the ip of the calling function)
 /// Check this address with the `check_address_consistency` function
-fn check_caller_consistency(regs: &bindings::pt_regs) -> Result<Option<bool>> {
+fn check_caller_consistency(regs: &bindings::pt_regs) -> Result<Option<event::Events>> {
     let sp = regs.sp as *const u64;
 
     // Parent ip
     // SAFETY : The sp should point to a valid point in memory
     let pip = unsafe { *sp };
 
-    check_address_consistency(pip)
+    match check_address_consistency(pip) {
+        Ok(Some(event::Events::ModuleAddress(_))) => Ok(None),
+        other => other,
+    }
 }
 
 struct UsermodehelperProbe;
 
 impl fprobe::FprobeOperations for UsermodehelperProbe {
+    type Data = Arc<EventStack>;
     /// Check only the module consistency
-    fn entry_handler(_fprobe: (), _entry_ip: usize, regs: &bindings::pt_regs) {
+    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
         let pstr = regs.di as *const c_char;
 
         if pstr.is_null() {
@@ -171,45 +229,59 @@ impl fprobe::FprobeOperations for UsermodehelperProbe {
                 pr_err!("Error while checking module consistency\n");
                 return;
             }
-            Ok(Some(true)) => pr_alert!("Called function : usermode_helper\n"),
+            Ok(Some(event)) => match data.push_event(event) {
+                Err(_) => pr_err!("Error while pushing event\n"),
+                _ => (),
+            },
             _ => (),
         };
     }
 
-    fn exit_handler(_fprobe: (), _entry_ip: usize, _regs: &bindings::pt_regs) {}
+    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    }
 }
 
 struct CommitCredsProbe;
 
 impl fprobe::FprobeOperations for CommitCredsProbe {
+    type Data = Arc<EventStack>;
     /// Check only the module consistency
-    fn entry_handler(_fprobe: (), _entry_ip: usize, regs: &bindings::pt_regs) {
+    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
         match check_caller_consistency(regs) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
                 return;
             }
-            Ok(Some(true)) => pr_alert!("Called function : commit_creds\n"),
+            Ok(Some(event)) => match data.push_event(event) {
+                Err(_) => pr_err!("Error while pushing event\n"),
+                _ => (),
+            },
             _ => (),
         };
     }
-    fn exit_handler(_fprobe: (), _entry_ip: usize, _regs: &bindings::pt_regs) {}
+    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    }
 }
 
 struct KallsymsLookupNameProbe;
 
 impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
+    type Data = Arc<EventStack>;
     /// Check the module consistency
     /// Check that the symbol looked up for is in the blacklist or not
-    fn entry_handler(_fprobe: (), _entry_ip: usize, regs: &bindings::pt_regs) {
+    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
         match check_caller_consistency(regs) {
             Err(_) => {
-                pr_err!("Error while checking module consistency");
+                pr_err!("Error while checking module consistency\n");
                 return;
             }
-            Ok(Some(true)) => pr_alert!("Called function : kallsyms_lookup_name"),
+            Ok(Some(event)) => match data.push_event(event) {
+                Err(_) => pr_err!("Error while pushing event\n"),
+                _ => (),
+            },
             _ => (),
         };
+
         let pstr = regs.di as *const c_char;
 
         let str = unsafe { CStr::from_char_ptr(pstr) };
@@ -224,7 +296,8 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
             }
         }
     }
-    fn exit_handler(_fprobe: (), _entry_ip: usize, _regs: &bindings::pt_regs) {}
+    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    }
 }
 
 struct MSRIntegrity;
@@ -297,11 +370,13 @@ impl MSRIntegrity {
     }
 }
 
-struct SyscallIntegrity;
+struct SyscallIntegrity {
+    events: Arc<EventStack>,
+}
 
 impl SyscallIntegrity {
-    fn init() -> Result<Self> {
-        Ok(SyscallIntegrity)
+    fn init(events: Arc<EventStack>) -> Result<Self> {
+        Ok(SyscallIntegrity { events })
     }
 
     /// For each entry in the syscall table check that the address isn't in a module
@@ -325,9 +400,13 @@ impl SyscallIntegrity {
             unsafe { slice::from_raw_parts(addr_sys_table as *const u64, NB_SYCALLS) };
 
         for syscall in sys_call_table {
-            let res = check_address_consistency(*syscall)?;
-            if let Some(_) = res {
-                pr_alert!("Syscall table entry hijacked\n");
+            if let Some(event) = check_address_consistency(*syscall)? {
+                self.events.push_event(event::Events::IndirectCallHijack(
+                    IndirectCallHijackInfo {
+                        ptr_type: event::FunctionPointerType::Syscall,
+                    },
+                ))?;
+                self.events.push_event(event)?;
             }
         }
         Ok(())
@@ -472,29 +551,22 @@ struct IntegrityCheck {
 }
 
 impl IntegrityCheck {
-    fn init() -> Result<Self> {
+    fn init(events: Arc<EventStack>) -> Result<Self> {
         Ok(IntegrityCheck {
             function_integ: FunctionIntegrity::init()?,
-            syscall_integ: SyscallIntegrity::init()?,
+            syscall_integ: SyscallIntegrity::init(events.clone())?,
             msr_integ: MSRIntegrity::init()?,
             cf_integ: CFIntegrity::init()?,
         })
     }
 }
 
-struct LoadModuleProbe {
-    _wait_queue: Arc<Pin<Box<CondVar>>>,
-    event_stack: Arc<Pin<Box<SpinLock<Vec<Events>>>>>,
-}
+struct LoadModuleProbe;
 
 impl FprobeOperations for LoadModuleProbe {
-    type Data = Arc<Self>;
+    type Data = Arc<EventStack>;
 
-    fn entry_handler(
-        data: ArcBorrow<'_, LoadModuleProbe>,
-        _entry_ip: usize,
-        regs: &bindings::pt_regs,
-    ) {
+    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
         let module = regs.di as *const bindings::module;
 
         if module == core::ptr::null() {
@@ -529,50 +601,36 @@ impl FprobeOperations for LoadModuleProbe {
             name,
         });
 
-        match data.event_stack.lock().try_push(event) {
-            Err(_) => pr_info!("Error trying to push a new value\n"),
+        match data.push_event(event) {
+            Err(_) => pr_info!("Error trying to push a new event\n"),
             _ => (),
         };
-        data._wait_queue.notify_all();
     }
-    fn exit_handler(
-        _data: ArcBorrow<'_, LoadModuleProbe>,
-        _entry_ip: usize,
-        _regs: &bindings::pt_regs,
-    ) {
+    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
     }
 }
 
 struct Probes {
     _usermodehelper_probe: Pin<Box<fprobe::Fprobe<UsermodehelperProbe>>>,
-    _init_module_probe: Pin<Box<fprobe::Fprobe<SysInitModuleProbe>>>,
     _commit_creds_probe: Pin<Box<fprobe::Fprobe<CommitCredsProbe>>>,
     _kallsyms_lookup_name_probe: Pin<Box<fprobe::Fprobe<KallsymsLookupNameProbe>>>,
     _load_module_probe: Pin<Box<fprobe::Fprobe<LoadModuleProbe>>>,
 }
 
 impl Probes {
-    fn init(
-        queue: Arc<Pin<Box<CondVar>>>,
-        event_stack: Arc<Pin<Box<SpinLock<Vec<Events>>>>>,
-    ) -> Result<Self> {
+    fn init(events: Arc<EventStack>) -> Result<Self> {
         pr_info!("Registering probes\n");
 
-        let private_data = Arc::try_new(LoadModuleProbe {
-            _wait_queue: queue,
-            event_stack,
-        })?;
-
-        let _usermodehelper_probe = fprobe::Fprobe::new_pinned("call_usermodehelper", None, ())?;
-        let _init_module_probe = fprobe::Fprobe::new_pinned("__x64_sys_init_module", None, ())?;
-        let _commit_creds_probe = fprobe::Fprobe::new_pinned("commit_creds", None, ())?;
+        let _usermodehelper_probe =
+            fprobe::Fprobe::new_pinned("call_usermodehelper", None, events.clone())?;
+        let _commit_creds_probe = fprobe::Fprobe::new_pinned("commit_creds", None, events.clone())?;
         let _kallsyms_lookup_name_probe =
-            fprobe::Fprobe::new_pinned("kallsyms_lookup_name", None, ())?;
-        let _load_module_probe = fprobe::Fprobe::new_pinned("do_init_module", None, private_data)?;
+            fprobe::Fprobe::new_pinned("kallsyms_lookup_name", None, events.clone())?;
+        let _load_module_probe =
+            fprobe::Fprobe::new_pinned("do_init_module", None, events.clone())?;
 
         let probes = Probes {
             _usermodehelper_probe,
-            _init_module_probe,
             _commit_creds_probe,
             _kallsyms_lookup_name_probe,
             _load_module_probe,
@@ -589,9 +647,8 @@ impl Drop for Probes {
 }
 
 struct Communication {
-    _wait_queue: Arc<Pin<Box<CondVar>>>,
     integrity_check: Arc<IntegrityCheck>,
-    event_stack: Arc<Pin<Box<SpinLock<Vec<Events>>>>>,
+    events: Arc<EventStack>,
 }
 
 #[vtable]
@@ -608,25 +665,12 @@ impl file::Operations for Communication {
         _writer: &mut impl kernel::io_buffer::IoBufferWriter,
         _offset: u64,
     ) -> Result<usize> {
-        // We wait for a new event in the stack
-        let mut lock = _data.event_stack.lock();
-        while lock.is_empty() {
-            if _data._wait_queue.wait(&mut lock) {
-                return Err(EINTR);
-            }
-        }
+        let event = _data.events.wait_events()?;
 
         // Once a new event arrived we send it if the buffer is long enough
         if _writer.len() < core::mem::size_of::<[u8; core::mem::size_of::<Events>()]>() {
             return Err(ENOMEM);
         }
-
-        // If we could make a while let with an else let statment this situation won't exist,
-        // We cannot get the None option of this match but anyway
-        let event: event::Events = match lock.pop() {
-            Some(event) => event,
-            None => return Err(EAGAIN),
-        };
 
         let buf =
             unsafe { core::mem::transmute::<Events, [u8; core::mem::size_of::<Events>()]>(event) };
@@ -709,33 +753,18 @@ impl kernel::Module for RootkitDetection {
 
         pr_info!("Registering the device\n");
 
-        // SAFETY : CondVar::init() is called below
-        let mut queue = Box::into_pin(Box::try_new(unsafe { CondVar::new() })?);
-        kernel::condvar_init!(queue.as_mut(), "data queue");
-
-        let queue = Arc::try_new(queue)?;
-
-        // Create a Spiinlock for the event_stack field because we can be called from everywhere
-        // so we shouldn't block like a mutex/semaphore do.
-        // SAFETY : `spinlock_init` is called below
-        let event_stack = unsafe { SpinLock::new(Vec::new()) };
-
-        let mut event_stack = Box::into_pin(Box::try_new(event_stack)?);
-        kernel::spinlock_init!(event_stack.as_mut(), "event stack");
-
-        let event_stack = Arc::try_new(event_stack)?;
+        let event_stack = EventStack::init()?;
 
         // Setting up the probes
-        let _probe = Probes::init(queue.clone(), event_stack.clone())?;
+        let _probe = Probes::init(event_stack.clone())?;
 
-        let _integrity_check = Arc::try_new(IntegrityCheck::init()?)?;
+        let _integrity_check = Arc::try_new(IntegrityCheck::init(event_stack.clone())?)?;
 
         // Checks relative to the integrity (of text section, functions pointer, control registers...)
         // Initialize the integrity structure, saving th state of multiple elements
         let communication = Arc::try_new(Communication {
-            _wait_queue: queue,
             integrity_check: _integrity_check.clone(),
-            event_stack,
+            events: event_stack,
         })?;
 
         // Create a simple character device (only one device file) to communicate with userspace

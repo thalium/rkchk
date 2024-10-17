@@ -30,11 +30,11 @@ pub struct IndirectCallHijackInfo {
     pub ptr_type: FunctionPointerType,
 }
 
-/// Info about an inconsistency in the module structures
+/// Info about a module found
 #[repr(C)]
-pub struct ModuleInconsistencyInfo {
+pub struct ModuleInfo {
     /// Name of the module concerned
-    pub name: [u8; SIZE_STRING],
+    pub name: [u8; MODULE_NAME_SIZE],
 }
 
 /// Type of event that can be triggered
@@ -47,5 +47,9 @@ pub enum Events {
     /// A fonction pointer has been hijacked
     IndirectCallHijack(IndirectCallHijackInfo),
     /// An inconsistency in the structures used to store the module has been detected
-    ModuleInconsistency(ModuleInconsistencyInfo),
+    ModuleInconsistency(ModuleInfo),
+    /// An address coming from a module was found
+    ModuleAddress(ModuleInfo),
+    /// An hidden module was detected
+    HiddenModule,
 }
