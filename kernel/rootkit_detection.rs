@@ -1,48 +1,68 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#![allow(clippy::undocumented_unsafe_blocks)]
+
 //! Rust character device sample.
 use core::clone::Clone;
-use core::hash::Hash;
-
 use core::default::Default;
 use core::ffi::c_char;
+use core::hash::Hash;
 use core::hash::Hasher;
 use core::iter::Iterator;
+use core::mem;
+use core::ptr::addr_of;
 use core::result::Result::Err;
 use core::result::Result::Ok;
 use core::slice;
 use core::str;
-
 use event::Events;
+use event::FunctionInfo;
 use event::IndirectCallHijackInfo;
 use event::LoadedLKMInfo;
 use event::ModuleInfo;
-use kernel::fprobe::FprobeOperations;
-use kernel::module::is_kernel;
-use kernel::module::symbols_lookup_name;
-use kernel::sync::Arc;
-use kernel::sync::ArcBorrow;
-use kernel::sync::CondVar;
-
-use core::mem;
+use event::ProcessInfo;
 use kernel::bindings;
 use kernel::c_str;
 use kernel::error::Result;
-use kernel::file;
-use kernel::miscdev::Registration;
+use kernel::fprobe::FprobeOperations;
+use kernel::impl_has_list_links;
+use kernel::impl_list_item;
+use kernel::ioctl::_IO;
+use kernel::ioctl::_IOC_SIZE;
+use kernel::ioctl::_IOR;
+use kernel::list::impl_list_arc_safe;
+use kernel::list::List;
+use kernel::list::ListArc;
+use kernel::list::ListLinks;
+use kernel::miscdevice;
+use kernel::miscdevice::MiscDevice;
+use kernel::miscdevice::MiscDeviceRegistration;
+use kernel::module::is_kernel;
 use kernel::module::is_module;
+use kernel::module::symbols_lookup_name;
+use kernel::new_condvar;
+use kernel::new_spinlock;
+use kernel::prelude::*;
+use kernel::socket;
 use kernel::str::CStr;
-
-use alloc::boxed::Box;
+use kernel::str::CString;
+use kernel::sync::Arc;
+use kernel::sync::ArcBorrow;
+use kernel::sync::CondVar;
 use kernel::sync::SpinLock;
+use kernel::task::Task;
+use kernel::transmute::AsBytes;
+use kernel::types::ForeignOwnable;
+use kernel::uaccess::UserSlice;
 
 use kernel::fprobe;
 use kernel::insn;
 use kernel::module;
-use kernel::prelude::*;
 
 pub mod event;
 pub mod fx_hash;
+
+unsafe impl AsBytes for event::Events {}
 
 /// The maximum number of byte we saved for a given function
 const MAX_SAVED_SIZE: usize = 4096;
@@ -81,9 +101,20 @@ const X86_OP_JMP: i32 = 0xE9;
 /// Breakpoint
 const X86_OP_BP: i32 = 0xCC;
 
-/// IOCTL number
-/// Run all the integrity checks
-const RKCHK_INTEG_ALL: u32 = 1;
+/// RKCHK ioctl type (aka magic number)
+const RKCHK_IOC_MAGIC: u32 = b'j' as u32;
+/// Run all the integrity checks (ioctl sequence number)
+const RKCHK_INTEG_ALL_NR: u32 = 1;
+/// Run all the integrity checks (ioctl command)
+const RKCHK_INTEG_ALL: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
+/// Read new events (ioctl sequence number)
+const RKCHK_READ_EVENT_NR: u32 = 2;
+/// Read new events (ioctl command)
+const RKCHK_READ_EVENT: u32 = _IOR::<event::Events>(RKCHK_IOC_MAGIC, RKCHK_READ_EVENT_NR);
+
+static mut EVENT_STACK: Option<Arc<EventStack>> = None;
+
+static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
 module! {
     type: RootkitDetection,
@@ -93,49 +124,71 @@ module! {
     license: "GPL",
 }
 
+#[pin_data]
+struct KEvents {
+    #[pin]
+    list_link: ListLinks<0>,
+    event: Events,
+}
+
+// TODO : Ask for Infaillible Error
+impl KEvents {
+    fn new(event: Events) -> Result<ListArc<Self>> {
+        ListArc::pin_init(
+            try_pin_init!(KEvents {
+                list_link <- ListLinks::new(),
+                event,
+            }),
+            GFP_KERNEL,
+        )
+    }
+
+    fn get_ref_event(&self) -> &Events {
+        &self.event
+    }
+}
+
+impl_has_list_links!(impl HasListLinks for KEvents { self.list_link });
+impl_list_item!(impl ListItem<0> for KEvents { using ListLinks; });
+impl_list_arc_safe!(impl ListArcSafe<0> for KEvents { untracked; });
+
+#[pin_data]
 struct EventStack {
-    wait_queue: Pin<Box<CondVar>>,
-    event_stack: Pin<Box<SpinLock<Vec<Events>>>>,
+    x: u32,
+    #[pin]
+    wait_queue: CondVar,
+    #[pin]
+    event_stack: SpinLock<List<KEvents, 0>>,
 }
 
 impl EventStack {
     fn init() -> Result<Arc<Self>> {
-        // SAFETY : CondVar::init() is called below
-        let mut wait_queue = Box::into_pin(Box::try_new(unsafe { CondVar::new() })?);
-        kernel::condvar_init!(wait_queue.as_mut(), "data queue");
-
-        // Create a Spiinlock for the event_stack field because we can be called from everywhere
-        // so we shouldn't block like a mutex/semaphore do.
-        // SAFETY : `spinlock_init` is called below
-        let event_stack = unsafe { SpinLock::new(Vec::new()) };
-
-        let mut event_stack = Box::into_pin(Box::try_new(event_stack)?);
-        kernel::spinlock_init!(event_stack.as_mut(), "event stack");
-
-        Arc::try_new(EventStack {
-            wait_queue,
-            event_stack,
-        })
+        Arc::pin_init(
+            pin_init!(EventStack {
+                x : 0,
+                wait_queue <- new_condvar!("data queue"),
+                event_stack <- new_spinlock!(List::new(), "event stack"),
+            }),
+            GFP_KERNEL,
+        )
     }
 
-    fn push_event(&self, event: event::Events) -> Result<()> {
-        self.event_stack.lock().try_push(event)?;
+    fn push_event(&self, event: ListArc<KEvents, 0>) {
+        self.event_stack.lock().push_front(event);
 
-        self.wait_queue.notify_all();
-
-        Ok(())
+        self.wait_queue.notify_one();
     }
 
-    fn wait_events(&self) -> Result<event::Events> {
+    fn wait_events(&self) -> Result<ListArc<KEvents, 0>> {
         let mut lock = self.event_stack.lock();
         while lock.is_empty() {
-            if self.wait_queue.wait(&mut lock) {
+            if self.wait_queue.wait_interruptible(&mut lock) {
                 return Err(EINTR);
             }
         }
         // If we could make a while let with an else let statment this situation won't exist,
         // We cannot get the None option of this match but anyway
-        match lock.pop() {
+        match lock.pop_back() {
             Some(event) => Ok(event),
             None => Err(EAGAIN),
         }
@@ -155,7 +208,7 @@ fn check_address_consistency(addr: u64) -> Result<Option<event::Events>> {
     let mut offset: u64 = 0;
     let mut _symbolsize: u64 = 0;
 
-    let (modname, symbol): (Option<Vec<u8>>, Option<Vec<u8>>) =
+    let (modname, symbol): (Option<KVec<u8>>, Option<KVec<u8>>) =
         module::symbols_lookup_address(addr, &mut offset, &mut _symbolsize)?;
 
     if let Some(name) = modname {
@@ -194,14 +247,8 @@ fn check_address_consistency(addr: u64) -> Result<Option<event::Events>> {
 
 /// Get the parent ip (the ip of the calling function)
 /// Check this address with the `check_address_consistency` function
-fn check_caller_consistency(regs: &bindings::pt_regs) -> Result<Option<event::Events>> {
-    let sp = regs.sp as *const u64;
-
-    // Parent ip
-    // SAFETY : The sp should point to a valid point in memory
-    let pip = unsafe { *sp };
-
-    match check_address_consistency(pip) {
+fn check_caller_consistency(pip: usize) -> Result<Option<event::Events>> {
+    match check_address_consistency(pip as u64) {
         Ok(Some(event::Events::ModuleAddress(_))) => Ok(None),
         other => other,
     }
@@ -212,11 +259,16 @@ struct UsermodehelperProbe;
 impl fprobe::FprobeOperations for UsermodehelperProbe {
     type Data = Arc<EventStack>;
     /// Check only the module consistency
-    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
+    fn entry_handler(
+        data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        ret_ip: usize,
+        regs: &bindings::pt_regs,
+    ) -> Option<()> {
         let pstr = regs.di as *const c_char;
 
         if pstr.is_null() {
-            return;
+            return Some(());
         }
 
         //SAFETY : The C code should give us a valid pointer to a null terminated string
@@ -224,20 +276,26 @@ impl fprobe::FprobeOperations for UsermodehelperProbe {
 
         pr_info!("Executing the program : {}\n", prog);
 
-        match check_caller_consistency(regs) {
+        match check_caller_consistency(ret_ip) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
-                return;
+                return Some(());
             }
-            Ok(Some(event)) => match data.push_event(event) {
+            Ok(Some(event)) => match KEvents::new(event) {
                 Err(_) => pr_err!("Error while pushing event\n"),
-                _ => (),
+                Ok(kevent) => data.push_event(kevent),
             },
             _ => (),
         };
+        Some(())
     }
 
-    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    fn exit_handler(
+        _data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
     }
 }
 
@@ -246,20 +304,31 @@ struct CommitCredsProbe;
 impl fprobe::FprobeOperations for CommitCredsProbe {
     type Data = Arc<EventStack>;
     /// Check only the module consistency
-    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        match check_caller_consistency(regs) {
+    fn entry_handler(
+        data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) -> Option<()> {
+        match check_caller_consistency(ret_ip) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
-                return;
+                return Some(());
             }
-            Ok(Some(event)) => match data.push_event(event) {
+            Ok(Some(event)) => match KEvents::new(event) {
                 Err(_) => pr_err!("Error while pushing event\n"),
-                _ => (),
+                Ok(kevent) => data.push_event(kevent),
             },
             _ => (),
         };
+        Some(())
     }
-    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    fn exit_handler(
+        _data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
     }
 }
 
@@ -269,15 +338,20 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
     type Data = Arc<EventStack>;
     /// Check the module consistency
     /// Check that the symbol looked up for is in the blacklist or not
-    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
-        match check_caller_consistency(regs) {
+    fn entry_handler(
+        data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        ret_ip: usize,
+        regs: &bindings::pt_regs,
+    ) -> Option<()> {
+        match check_caller_consistency(ret_ip) {
             Err(_) => {
                 pr_err!("Error while checking module consistency\n");
-                return;
+                return Some(());
             }
-            Ok(Some(event)) => match data.push_event(event) {
+            Ok(Some(event)) => match KEvents::new(event) {
                 Err(_) => pr_err!("Error while pushing event\n"),
-                _ => (),
+                Ok(kevent) => data.push_event(kevent),
             },
             _ => (),
         };
@@ -295,16 +369,24 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
                 break;
             }
         }
+        Some(())
     }
-    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    fn exit_handler(
+        _data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
     }
 }
 
-struct MSRIntegrity;
+struct MSRIntegrity {
+    events: Arc<EventStack>,
+}
 
 impl MSRIntegrity {
-    fn init() -> Result<Self> {
-        Ok(MSRIntegrity)
+    fn init(events: Arc<EventStack>) -> Result<Self> {
+        Ok(MSRIntegrity { events })
     }
 
     /// Some bit in the CR should be set in kernel mode, check them
@@ -320,7 +402,9 @@ impl MSRIntegrity {
         }
 
         if (cr_4 & CR4_SMAP == 0) || (cr_4 & CR4_SMEP == 0) || (cr_4 & CR4_UMIP == 0) {
-            pr_alert!("Invariant bit in CR4 = {:#016x}\n", cr_4);
+            self.events
+                .push_event(KEvents::new(event::Events::TamperedMSR)?);
+            //pr_alert!("Invariant bit in CR4 = {:#016x}\n", cr_4);
         }
 
         let cr_0: u64;
@@ -331,7 +415,9 @@ impl MSRIntegrity {
         }
 
         if cr_0 & CR0_WP == 0 {
-            pr_alert!("Invariant bit in CR0 = {:#016x}\n", cr_0);
+            self.events
+                .push_event(KEvents::new(event::Events::TamperedMSR)?);
+            //pr_alert!("Invariant bit in CR0 = {:#016x}\n", cr_0);
         }
 
         Ok(())
@@ -363,7 +449,9 @@ impl MSRIntegrity {
 
         // Checking the integrity of the register
         if lstar != entry_syscall_64 {
-            pr_alert!("MSR LSTAR register (syscall jump address) not set to the right symbol\n");
+            self.events
+                .push_event(KEvents::new(event::Events::TamperedMSR)?);
+            //pr_alert!("MSR LSTAR register (syscall jump address) not set to the right symbol\n");
         }
 
         Ok(())
@@ -401,12 +489,13 @@ impl SyscallIntegrity {
 
         for syscall in sys_call_table {
             if let Some(event) = check_address_consistency(*syscall)? {
-                self.events.push_event(event::Events::IndirectCallHijack(
-                    IndirectCallHijackInfo {
-                        ptr_type: event::FunctionPointerType::Syscall,
-                    },
-                ))?;
-                self.events.push_event(event)?;
+                self.events
+                    .push_event(KEvents::new(event::Events::IndirectCallHijack(
+                        IndirectCallHijackInfo {
+                            ptr_type: event::FunctionPointerType::Syscall,
+                        },
+                    ))?);
+                self.events.push_event(KEvents::new(event)?);
             }
         }
         Ok(())
@@ -414,13 +503,15 @@ impl SyscallIntegrity {
 }
 
 struct FunctionIntegrity {
-    saved_function: Vec<(String, u64)>,
+    events: Arc<EventStack>,
+    saved_function: KVec<(CString, u64)>,
 }
 
 impl FunctionIntegrity {
-    fn init() -> Result<Self> {
+    fn init(events: Arc<EventStack>) -> Result<Self> {
         let mut fct_integ = FunctionIntegrity {
-            saved_function: Vec::new(),
+            saved_function: KVec::new(),
+            events,
         };
 
         fct_integ.save_function(c_str!("ip_rcv"))?;
@@ -438,12 +529,14 @@ impl FunctionIntegrity {
         let addr = module::symbols_lookup_name(name);
 
         if addr == 0 as u64 {
+            pr_info!("Invalid address lookup\n");
             return Err(EINVAL);
         }
 
         let (mut symbolsize, offset) = module::symbols_lookup_size_offset(addr);
 
         if offset != 0 {
+            pr_info!("Invalid offset, (weird) : {}\n", offset);
             return Err(EINVAL);
         }
 
@@ -472,44 +565,50 @@ impl FunctionIntegrity {
     fn save_function(&mut self, name: &CStr) -> Result {
         let hash = self.get_function_hash(name)?;
 
-        // Converting &Cstr to String (kind of a pain)
-        let mut name_buf: Vec<u8> = Vec::try_with_capacity(name.len())?;
-        name_buf.try_extend_from_slice(name.as_bytes_with_nul())?;
-        let name = match String::from_utf8(name_buf) {
-            Ok(name) => name,
-            Err(_) => return Err(EINVAL),
-        };
-
-        self.saved_function.try_push((name, hash))?;
+        self.saved_function
+            .push((name.to_cstring()?, hash), GFP_KERNEL)?;
 
         Ok(())
     }
 
     /// Iter through all the saved functions
     /// Get the current text bytes and compare it to the saved text byte
-    fn check_functions(&self) -> Result<Option<&String>> {
+    fn check_functions(&self) -> Result<()> {
         pr_info!("Checking for function integrity\n");
         for (name, hash) in &self.saved_function {
-            let new_hash = self.get_function_hash(CStr::from_bytes_with_nul(name.as_bytes())?)?;
+            let new_hash = self.get_function_hash(&name)?;
             if new_hash != *hash {
-                return Ok(Some(name));
+                let mut buf = [0 as u8; event::SIZE_STRING];
+                for (i, e) in name.as_bytes().iter().enumerate() {
+                    let b = match buf.get_mut(i) {
+                        None => break,
+                        Some(b) => b,
+                    };
+                    *b = *e;
+                }
+                let event = event::Events::TamperedFunction(FunctionInfo { name: buf });
+                self.events.push_event(KEvents::new(event)?);
             }
         }
-        Ok(None)
+        Ok(())
     }
 }
 
 struct CFIntegrity {
-    checked_function: Vec<&'static CStr>,
+    events: Arc<EventStack>,
+    checked_function: KVec<&'static CStr>,
 }
 
 impl CFIntegrity {
     /// Create a new instance of the structure
-    fn init() -> Result<Self> {
-        let mut checked_function = Vec::new();
-        checked_function.try_push(c_str!("ip_rcv"))?;
-        checked_function.try_push(c_str!("tcp4_seq_show"))?;
-        Ok(CFIntegrity { checked_function })
+    fn init(events: Arc<EventStack>) -> Result<Self> {
+        let mut checked_function = KVec::new();
+        checked_function.push(c_str!("ip_rcv"), GFP_KERNEL)?;
+        checked_function.push(c_str!("tcp4_seq_show"), GFP_KERNEL)?;
+        Ok(CFIntegrity {
+            checked_function,
+            events,
+        })
     }
 
     /// Check the first instruction of the function "name" to see if it isn't hooked.
@@ -532,11 +631,22 @@ impl CFIntegrity {
             let opcode = diss.get_opcode()?;
 
             if opcode == X86_OP_BP || opcode == X86_OP_JMP {
-                pr_alert!(
+                /*pr_alert!(
                     "Function : {} probably hooked using opcode {:#02x}\n",
                     fct_name,
                     opcode
-                );
+                );*/
+                let mut buf = [0 as u8; event::SIZE_STRING];
+                for (i, e) in fct_name.as_bytes().iter().enumerate() {
+                    let b = match buf.get_mut(i) {
+                        None => break,
+                        Some(b) => b,
+                    };
+                    *b = *e;
+                }
+
+                let event = event::Events::HookedFunction(FunctionInfo { name: buf });
+                self.events.push_event(KEvents::new(event)?);
             }
         }
         Ok(())
@@ -553,10 +663,10 @@ struct IntegrityCheck {
 impl IntegrityCheck {
     fn init(events: Arc<EventStack>) -> Result<Self> {
         Ok(IntegrityCheck {
-            function_integ: FunctionIntegrity::init()?,
+            function_integ: FunctionIntegrity::init(events.clone())?,
             syscall_integ: SyscallIntegrity::init(events.clone())?,
-            msr_integ: MSRIntegrity::init()?,
-            cf_integ: CFIntegrity::init()?,
+            msr_integ: MSRIntegrity::init(events.clone())?,
+            cf_integ: CFIntegrity::init(events.clone())?,
         })
     }
 }
@@ -566,15 +676,20 @@ struct LoadModuleProbe;
 impl FprobeOperations for LoadModuleProbe {
     type Data = Arc<EventStack>;
 
-    fn entry_handler(data: ArcBorrow<'_, EventStack>, _entry_ip: usize, regs: &bindings::pt_regs) {
+    fn entry_handler(
+        data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+    ) -> Option<()> {
         let module = regs.di as *const bindings::module;
 
         if module == core::ptr::null() {
-            return;
+            return Some(());
         }
 
         // SAFETY : module is non null so is valid
-        let core_layout = unsafe { (*module).core_layout };
+        let core_layout = unsafe { (*module).mem[bindings::mod_mem_type_MOD_TEXT as usize] };
 
         let size = core_layout.size as usize;
         let addr_core = core_layout.base as *const u8;
@@ -601,20 +716,75 @@ impl FprobeOperations for LoadModuleProbe {
             name,
         });
 
-        match data.push_event(event) {
+        match KEvents::new(event) {
             Err(_) => pr_info!("Error trying to push a new event\n"),
-            _ => (),
+            Ok(kevent) => data.push_event(kevent),
         };
+        Some(())
     }
-    fn exit_handler(_data: ArcBorrow<'_, EventStack>, _entry_ip: usize, _regs: &bindings::pt_regs) {
+    fn exit_handler(
+        _data: ArcBorrow<'_, EventStack>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
+    }
+}
+
+struct KSysDup3Probe;
+
+// This probe is for checking if someone try to map stdin/stdout to a socket
+impl FprobeOperations for KSysDup3Probe {
+    type Data = Arc<EventStack>;
+
+    fn entry_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+    ) -> Option<()> {
+        let oldfd: i32 = regs.di as i32;
+        let newfd: i32 = regs.si as i32;
+
+        let res = match socket::is_fd_sock(oldfd) {
+            Err(_) => {
+                pr_info!("Error looking at fd\n");
+                return Some(());
+            }
+            Ok(res) => res,
+        };
+
+        // The oldfd (so the one being mapped) is a socket
+        if res {
+            // If the socket is being mapped to stdin or stdout's fd
+            if newfd == 1 || newfd == 0 {
+                let event = event::Events::StdioToSocket(ProcessInfo {
+                    // SAFETY : while this function execute this task exist
+                    tgid: unsafe { Task::current() }.pid() as i32,
+                });
+                match KEvents::new(event) {
+                    Err(_) => pr_info!("Error trying to push a new event\n"),
+                    Ok(kevent) => data.push_event(kevent),
+                };
+            }
+        }
+        Some(())
+    }
+    fn exit_handler(
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
     }
 }
 
 struct Probes {
-    _usermodehelper_probe: Pin<Box<fprobe::Fprobe<UsermodehelperProbe>>>,
-    _commit_creds_probe: Pin<Box<fprobe::Fprobe<CommitCredsProbe>>>,
-    _kallsyms_lookup_name_probe: Pin<Box<fprobe::Fprobe<KallsymsLookupNameProbe>>>,
-    _load_module_probe: Pin<Box<fprobe::Fprobe<LoadModuleProbe>>>,
+    _usermodehelper_probe: Pin<KBox<fprobe::Fprobe<UsermodehelperProbe>>>,
+    _commit_creds_probe: Pin<KBox<fprobe::Fprobe<CommitCredsProbe>>>,
+    _kallsyms_lookup_name_probe: Pin<KBox<fprobe::Fprobe<KallsymsLookupNameProbe>>>,
+    _load_module_probe: Pin<KBox<fprobe::Fprobe<LoadModuleProbe>>>,
+    _ksys_dup3_probe: Pin<KBox<fprobe::Fprobe<KSysDup3Probe>>>,
 }
 
 impl Probes {
@@ -628,12 +798,14 @@ impl Probes {
             fprobe::Fprobe::new_pinned("kallsyms_lookup_name", None, events.clone())?;
         let _load_module_probe =
             fprobe::Fprobe::new_pinned("do_init_module", None, events.clone())?;
+        let _ksys_dup3_probe = fprobe::Fprobe::new_pinned("ksys_dup3", None, events.clone())?;
 
         let probes = Probes {
             _usermodehelper_probe,
             _commit_creds_probe,
             _kallsyms_lookup_name_probe,
             _load_module_probe,
+            _ksys_dup3_probe,
         };
 
         Ok(probes)
@@ -652,53 +824,71 @@ struct Communication {
 }
 
 #[vtable]
-impl file::Operations for Communication {
-    type OpenData = Arc<Self>;
-    type Data = Arc<Self>;
-    fn open(context: &Self::OpenData, _file: &file::File) -> Result<Self::Data> {
-        Ok(context.clone())
-    }
+impl MiscDevice for Communication {
+    type Ptr = Arc<Self>;
 
-    fn read(
-        _data: <Self::Data as kernel::ForeignOwnable>::Borrowed<'_>,
-        _file: &file::File,
-        _writer: &mut impl kernel::io_buffer::IoBufferWriter,
-        _offset: u64,
-    ) -> Result<usize> {
-        let event = _data.events.wait_events()?;
-
-        // Once a new event arrived we send it if the buffer is long enough
-        if _writer.len() < core::mem::size_of::<[u8; core::mem::size_of::<Events>()]>() {
-            return Err(ENOMEM);
+    fn open() -> Result<Self::Ptr> {
+        unsafe {
+            match &*addr_of!(COMMUNICATION) {
+                None => Err(ENOMEM),
+                Some(communication) => Ok(communication.clone()),
+            }
         }
-
-        let buf =
-            unsafe { core::mem::transmute::<Events, [u8; core::mem::size_of::<Events>()]>(event) };
-
-        for e in &buf {
-            _writer.write(e)?;
-        }
-
-        Ok(core::mem::size_of::<[u8; core::mem::size_of::<Events>()]>())
     }
 
     fn ioctl(
-        data: <Self::Data as kernel::ForeignOwnable>::Borrowed<'_>,
-        file: &file::File,
-        cmd: &mut file::IoctlCommand,
-    ) -> Result<i32> {
-        cmd.dispatch::<Communication>(data, file)
+        data: <Self::Ptr as ForeignOwnable>::Borrowed<'_>,
+        cmd: u32,
+        arg: usize,
+    ) -> Result<isize> {
+        let size = _IOC_SIZE(cmd);
+        let user_slice = UserSlice::new(arg, size);
+        match cmd {
+            RKCHK_INTEG_ALL => {
+                data.integrity_check.function_integ.check_functions()?;
+
+                data.integrity_check
+                    .syscall_integ
+                    .check_syscall_position()?;
+
+                data.integrity_check.msr_integ.check_pinned_cr_bits()?;
+                data.integrity_check.msr_integ.check_msr_lstar()?;
+
+                data.integrity_check.cf_integ.check_custom_hook()?;
+
+                Ok(0)
+            }
+            RKCHK_READ_EVENT => {
+                let mut writer = user_slice.writer();
+                let event = data.events.wait_events()?;
+
+                // Once a new event arrived we send it if the buffer is long enough
+                if writer.len() < core::mem::size_of::<event::Events>() {
+                    return Err(ENOMEM);
+                }
+
+                writer.write::<event::Events>(event.get_ref_event())?;
+                /*let buf = unsafe {
+                    core::mem::transmute::<Events, [u8; core::mem::size_of::<Events>()]>(event)
+                };
+
+                for e in &buf {
+                    writer.write(e)?;
+                }*/
+
+                Ok(core::mem::size_of::<event::Events>() as _)
+            }
+            _ => Err(ENOTTY),
+        }
     }
 }
-
+/*
 impl file::IoctlHandler for Communication {
     type Target<'a> = ArcBorrow<'a, Communication>;
     fn pure(this: Self::Target<'_>, _file: &file::File, _cmd: u32, _arg: usize) -> Result<i32> {
         match (bindings::_IOC_NRMASK & _cmd) >> bindings::_IOC_NRSHIFT {
             RKCHK_INTEG_ALL => {
-                if let Some(fct) = this.integrity_check.function_integ.check_functions()? {
-                    pr_alert!("Function {} is hooked\n", fct);
-                }
+                this.integrity_check.function_integ.check_functions()?;
 
                 this.integrity_check
                     .syscall_integ
@@ -739,39 +929,60 @@ impl file::IoctlHandler for Communication {
         Err(ENOTTY)
     }
 }
+*/
 
 struct RootkitDetection {
-    _registration: Pin<Box<Registration<Communication>>>,
-    _probe: Probes,
+    _registration: Pin<KBox<MiscDeviceRegistration<Communication>>>,
+    _probe: Arc<Probes>,
     _integrity_check: Arc<IntegrityCheck>,
     _communication: Arc<Communication>,
 }
 
 impl kernel::Module for RootkitDetection {
-    fn init(name: &'static CStr, _module: &'static ThisModule) -> Result<Self> {
+    fn init(_module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rootkit detection written in Rust\n");
 
         pr_info!("Registering the device\n");
 
-        let event_stack = EventStack::init()?;
+        unsafe { EVENT_STACK = Some(EventStack::init()?) };
 
+        let event_stack = unsafe {
+            match &*addr_of!(EVENT_STACK) {
+                None => return Err(ENOMEM),
+                Some(event) => event.clone(),
+            }
+        };
         // Setting up the probes
-        let _probe = Probes::init(event_stack.clone())?;
+        let _probe = Arc::new(Probes::init(event_stack.clone())?, GFP_KERNEL)?;
 
-        let _integrity_check = Arc::try_new(IntegrityCheck::init(event_stack.clone())?)?;
+        let _integrity_check = Arc::new(IntegrityCheck::init(event_stack.clone())?, GFP_KERNEL)?;
 
         // Checks relative to the integrity (of text section, functions pointer, control registers...)
         // Initialize the integrity structure, saving th state of multiple elements
-        let communication = Arc::try_new(Communication {
-            integrity_check: _integrity_check.clone(),
-            events: event_stack,
-        })?;
+        unsafe {
+            COMMUNICATION = Some(Arc::new(
+                Communication {
+                    integrity_check: _integrity_check.clone(),
+                    events: event_stack.clone(),
+                },
+                GFP_KERNEL,
+            )?)
+        };
+
+        let communication = unsafe {
+            match &*addr_of!(COMMUNICATION) {
+                None => return Err(ENOMEM),
+                Some(communication) => communication.clone(),
+            }
+        };
 
         // Create a simple character device (only one device file) to communicate with userspace
         // For now only used to trigger the integrity check
-        let _registration = kernel::miscdev::Registration::<Communication>::new_pinned(
-            fmt!("{name}"),
-            communication.clone(),
+        let _registration = KBox::pin_init(
+            miscdevice::MiscDeviceRegistration::register(miscdevice::MiscDeviceOptions {
+                name: c_str!("rkchk"),
+            }),
+            GFP_KERNEL,
         )?;
 
         Ok(RootkitDetection {

@@ -37,6 +37,19 @@ pub struct ModuleInfo {
     pub name: [u8; MODULE_NAME_SIZE],
 }
 
+/// Info about a function found
+#[repr(C)]
+pub struct FunctionInfo {
+    /// Name of the function concerned
+    pub name: [u8; SIZE_STRING],
+}
+
+/// Information about a process
+pub struct ProcessInfo {
+    /// TGID of the process
+    pub tgid: i32,
+}
+
 /// Type of event that can be triggered
 #[repr(C)]
 pub enum Events {
@@ -52,4 +65,12 @@ pub enum Events {
     ModuleAddress(ModuleInfo),
     /// An hidden module was detected
     HiddenModule,
+    /// Hooked function was detected
+    HookedFunction(FunctionInfo),
+    /// Function whose code has been modified was detected
+    TamperedFunction(FunctionInfo),
+    /// An MSR (CR0 or CR4 or LSTAR) was tampered with
+    TamperedMSR,
+    /// Standard output or standard input is being mapped to a socket
+    StdioToSocket(ProcessInfo),
 }

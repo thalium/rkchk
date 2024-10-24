@@ -4,8 +4,15 @@ use nix;
 use nix::fcntl;
 use nix::sys::stat::Mode;
 const RKCHK_IOC_MAGIC: u8 = b'j';
-const RKCHK_INTEG_ALL: u8 = 1;
-nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL);
+const RKCHK_INTEG_ALL_NR: u8 = 1;
+const RKCHK_READ_EVENT_NR: u8 = 2;
+nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
+nix::ioctl_read_buf!(
+    rkchk_read_event,
+    RKCHK_IOC_MAGIC,
+    RKCHK_READ_EVENT_NR,
+    event::Events
+);
 
 impl Display for event::Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,6 +51,32 @@ impl Display for event::Events {
                 f,
                 "An hidden module was found\nNo information about it could be gathered"
             ),
+            Self::HookedFunction(info) => {
+                let mut name = String::from_utf8_lossy(&info.name).into_owned();
+
+                name.retain(|c| c != '\0');
+
+                write!(
+                    f,
+                    "Function with first instruction set to JMP/INT3 detected:\n\tname: {}",
+                    name
+                )
+            }
+            Self::TamperedFunction(info) => {
+                let mut name = String::from_utf8_lossy(&info.name).into_owned();
+
+                name.retain(|c| c != '\0');
+
+                write!(
+                    f,
+                    "Function tampered with detected (failed integrity check):\n\tname: {}",
+                    name
+                )
+            }
+            Self::TamperedMSR => write!(f, "An MSR (CR0 or CR4 or LSTAR) was tampered with"),
+            Self::StdioToSocket(info) => {
+                write!(f, "Somone mapped stadanrd I/O to a socket\nThis is a common technique to open reverse shell\n\ttgid: {}", info.tgid)
+            }
             _ => {
                 write!(f, "To be implemented\n")
             }
@@ -79,13 +112,14 @@ fn main() {
     }
     // TODO : Set all the string and pointer in the event structures to direct buffer because otherwise we transmit the kernel pointer
     loop {
-        nix::unistd::read(fd, &mut raw_event).unwrap();
+        let mut event = [event::Events::NoEvent];
+        unsafe { rkchk_read_event(fd, &mut event).unwrap() };
 
         // The device should return a type event
-        let event = unsafe {
+        /*let event = unsafe {
             std::mem::transmute::<[u8; std::mem::size_of::<Events>()], Events>(raw_event)
-        };
+        };*/
 
-        println!("{event}");
+        println!("{}", event.get(0).unwrap());
     }
 }
