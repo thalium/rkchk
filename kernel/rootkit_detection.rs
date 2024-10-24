@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
 
-#![allow(clippy::undocumented_unsafe_blocks)]
-
 //! Rust character device sample.
 use core::clone::Clone;
 use core::default::Default;
@@ -396,7 +394,7 @@ impl MSRIntegrity {
 
         let cr_4: u64;
 
-        // SAFETY : CR4 register always exist on x86_64
+        // SAFETY: CR4 register always exist on x86_64
         unsafe {
             asm!("mov {cr_4}, cr4", cr_4 = out(reg) cr_4);
         }
@@ -432,7 +430,7 @@ impl MSRIntegrity {
         let lstar: u64;
         let lstar_nb: u32 = bindings::MSR_LSTAR;
 
-        // SAFETY : lstar register exist on x86_64 processor
+        // SAFETY: lstar register exist on x86_64 processor
         // `rdmsr` store the 64 bit value in edx:eax
         // The high order bit of rax, rdx are cleared by rdmsr so we can `OR`` the two
         unsafe {
@@ -478,7 +476,7 @@ impl SyscallIntegrity {
                 < (isize::MAX as u128)
         );
 
-        // SAFETY :
+        // SAFETY:
         // 1- The object we manipulate is cthe sycall_table so it won't be deallocated
         // 2- addr is non null and aligned
         // 3- from addr to addr+NB_SYSCALL the memory is valid and readable because it is the syscall_table
@@ -546,7 +544,7 @@ impl FunctionIntegrity {
             symbolsize = MAX_SAVED_SIZE;
         }
 
-        // SAFETY :
+        // SAFETY:
         // 1- The object we manipulate is code so it should not be deallocated, except if the module we look at is unloaded (TODO : find a way to ensure that the module is not unloaded)
         // 2- addr is non null and aligned (because we ask for 1 byte data)
         // 3- from addr to addr+symbolsize the memory is valid and readable (in the kernel or a module)
@@ -618,7 +616,7 @@ impl CFIntegrity {
         for fct_name in &self.checked_function {
             let addr = module::symbols_lookup_name(fct_name);
 
-            // SAFETY :
+            // SAFETY:
             // 1- The object we manipulate is code so it should not be deallocated, except if the module we look at is unloaded (TODO : find a way to ensure that the module is not unloaded)
             // 2- addr is non null and aligned (because we ask for 1 byte data)
             // 3- We assume that from addr to addr+15 the memory is valid and readable (the disassembler should read only one instruction and nothing more so it isn't a problem)
@@ -688,13 +686,13 @@ impl FprobeOperations for LoadModuleProbe {
             return Some(());
         }
 
-        // SAFETY : module is non null so is valid
+        // SAFETY: module is non null so is valid
         let core_layout = unsafe { (*module).mem[bindings::mod_mem_type_MOD_TEXT as usize] };
 
         let size = core_layout.size as usize;
         let addr_core = core_layout.base as *const u8;
 
-        // SAFETY :
+        // SAFETY:
         // 1- The object we manipulate is code so it should not be deallocated, except if the module we look at is unloaded (TODO : find a way to ensure that the module is not unloaded)
         // 2- addr is non null and aligned (because we ask for 1 byte data)
         // 3- from addr_core to addr_core+size the memory is valid and readable
@@ -702,7 +700,7 @@ impl FprobeOperations for LoadModuleProbe {
         // 5- size <= MAX_SAVED_SIZE < mem::size_of::<u8>() * isize::MAX
         let tab: &[u8] = unsafe { slice::from_raw_parts(addr_core, size as usize) };
 
-        // SAFETY : module is non null so is valid
+        // SAFETY: module is non null so is valid
         let pname = unsafe { *(&(*module).name as *const [i8; 56] as *const [u8; 56]) };
 
         let mut hasher = fx_hash::FxHasher::default();
@@ -759,7 +757,7 @@ impl FprobeOperations for KSysDup3Probe {
             // If the socket is being mapped to stdin or stdout's fd
             if newfd == 1 || newfd == 0 {
                 let event = event::Events::StdioToSocket(ProcessInfo {
-                    // SAFETY : while this function execute this task exist
+                    // SAFETY: while this function execute this task exist
                     tgid: unsafe { Task::current() }.pid() as i32,
                 });
                 match KEvents::new(event) {
