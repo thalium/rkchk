@@ -789,14 +789,26 @@ impl Probes {
     fn init(events: Arc<EventStack>) -> Result<Self> {
         pr_info!("Registering probes\n");
 
-        let _usermodehelper_probe =
-            fprobe::Fprobe::new_pinned("call_usermodehelper", None, events.clone())?;
-        let _commit_creds_probe = fprobe::Fprobe::new_pinned("commit_creds", None, events.clone())?;
-        let _kallsyms_lookup_name_probe =
-            fprobe::Fprobe::new_pinned("kallsyms_lookup_name", None, events.clone())?;
-        let _load_module_probe =
-            fprobe::Fprobe::new_pinned("do_init_module", None, events.clone())?;
-        let _ksys_dup3_probe = fprobe::Fprobe::new_pinned("ksys_dup3", None, events.clone())?;
+        let _usermodehelper_probe = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("call_usermodehelper"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+        let _commit_creds_probe = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("commit_creds"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+        let _kallsyms_lookup_name_probe = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("kallsyms_lookup_name"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+        let _load_module_probe = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("do_init_module"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+        let _ksys_dup3_probe = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("ksys_dup3"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
 
         let probes = Probes {
             _usermodehelper_probe,
