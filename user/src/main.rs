@@ -77,6 +77,9 @@ impl Display for event::Events {
             Self::StdioToSocket(info) => {
                 write!(f, "Somone mapped stadanrd I/O to a socket\nThis is a common technique to open reverse shell\n\ttgid: {}", info.tgid)
             }
+            Self::EBPFFunc(info) => {
+                write!(f, "An eBPF programm was loaded and is using a function that can tamper with user or kernel space :\n\tfunction: {}\n\ttgid: {}", info.func_type, info.tgid)
+            }
             _ => {
                 write!(f, "To be implemented\n")
             }
@@ -93,17 +96,18 @@ impl Display for event::FunctionPointerType {
     }
 }
 
-pub mod event;
-use event::Events;
-fn main() {
-    let fd = fcntl::open(
-        "/dev/rootkit_detection",
-        fcntl::OFlag::O_RDWR,
-        Mode::empty(),
-    )
-    .unwrap();
+impl Display for event::EBPFFuncType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OverrideReturn => write!(f, "bpf_override_return"),
+            Self::WriteUser => write!(f, "bpf_probe_write_user"),
+        }
+    }
+}
 
-    let mut raw_event = [0 as u8; core::mem::size_of::<Events>()];
+pub mod event;
+fn main() {
+    let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
 
     println!("Running all the integrity checks\n");
 

@@ -13,6 +13,7 @@ use core::result::Result::Err;
 use core::result::Result::Ok;
 use core::slice;
 use core::str;
+use event::EBPFFuncInfo;
 use event::Events;
 use event::FunctionInfo;
 use event::IndirectCallHijackInfo;
@@ -777,12 +778,61 @@ impl FprobeOperations for KSysDup3Probe {
     }
 }
 
+struct CheckHelperCall;
+
+// This probe is for checking the function an eBPF programm is loading
+// We hook in a verifier function that is called at each call bpf instruction
+// and log each time `bpf_probe_write_user` or `bpf_override_return` is called
+impl FprobeOperations for CheckHelperCall {
+    type Data = Arc<EventStack>;
+
+    fn entry_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+    ) -> Option<()> {
+        let insn: *mut bindings::bpf_insn = regs.si as *mut bindings::bpf_insn;
+        if insn.is_null() {
+            return None;
+        }
+
+        // SAFETY: The pointer is not null, we can dereference it
+        let func_id = unsafe { (*insn).imm } as bindings::bpf_func_id;
+
+        let func_type = match func_id {
+            bindings::bpf_func_id_BPF_FUNC_override_return => event::EBPFFuncType::OverrideReturn,
+            bindings::bpf_func_id_BPF_FUNC_probe_write_user => event::EBPFFuncType::WriteUser,
+            _ => return None,
+        };
+
+        let event = event::Events::EBPFFunc(EBPFFuncInfo {
+            tgid: current!().pid(),
+            func_type,
+        });
+        match KEvents::new(event) {
+            Ok(kevent) => data.push_event(kevent),
+            Err(_) => pr_info!("Error trying to create a KEvent\n"),
+        };
+
+        Some(())
+    }
+    fn exit_handler(
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+    ) {
+    }
+}
+
 struct Probes {
     _usermodehelper_probe: Pin<KBox<fprobe::Fprobe<UsermodehelperProbe>>>,
     _commit_creds_probe: Pin<KBox<fprobe::Fprobe<CommitCredsProbe>>>,
     _kallsyms_lookup_name_probe: Pin<KBox<fprobe::Fprobe<KallsymsLookupNameProbe>>>,
     _load_module_probe: Pin<KBox<fprobe::Fprobe<LoadModuleProbe>>>,
     _ksys_dup3_probe: Pin<KBox<fprobe::Fprobe<KSysDup3Probe>>>,
+    _check_helper_call: Pin<KBox<fprobe::Fprobe<CheckHelperCall>>>,
 }
 
 impl Probes {
@@ -810,12 +860,18 @@ impl Probes {
             GFP_KERNEL,
         )?;
 
+        let _check_helper_call = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("check_helper_call"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+
         let probes = Probes {
             _usermodehelper_probe,
             _commit_creds_probe,
             _kallsyms_lookup_name_probe,
             _load_module_probe,
             _ksys_dup3_probe,
+            _check_helper_call,
         };
 
         Ok(probes)

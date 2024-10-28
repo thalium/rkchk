@@ -49,6 +49,22 @@ pub struct ProcessInfo {
     /// TGID of the process
     pub tgid: i32,
 }
+/// eBPF function capable of modifing kernel or
+pub enum EBPFFuncType {
+    /// Function usable in KPROBE type of program
+    /// that can ovveride the return of the hooked function
+    OverrideReturn,
+    /// Allow to write arbitrary data into an userspace buffer
+    WriteUser,
+}
+
+/// Info about a function being analysed by the verifier
+pub struct EBPFFuncInfo {
+    /// TGID of the program that called he verifier
+    pub tgid: i32,
+    /// Suspicious function that was called
+    pub func_type: EBPFFuncType,
+}
 
 /// Type of event that can be triggered
 #[repr(C)]
@@ -73,4 +89,7 @@ pub enum Events {
     TamperedMSR,
     /// Standard output or standard input is being mapped to a socket
     StdioToSocket(ProcessInfo),
+    /// An eBPF program with a function altering user or kernel memory
+    /// function is being loaded
+    EBPFFunc(EBPFFuncInfo),
 }
