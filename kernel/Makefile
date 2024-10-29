@@ -3,7 +3,7 @@
 KDIR ?= /lib/modules/`uname -r`/build
 
 default:
-	$(MAKE) -C $(KDIR) M=$$PWD
+	$(MAKE) -C $(KDIR) M=$$PWD 
 
-modules_install: default
-	$(MAKE) -C $(KDIR) M=$$PWD modules_install
+rust-analyzer:
+	$(MAKE) -C $(KDIR) M=$$PWD rust-analyzer

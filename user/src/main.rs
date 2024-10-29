@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{write, Display};
 
 use nix;
 use nix::fcntl;
@@ -108,6 +108,7 @@ impl Display for event::EBPFFuncType {
         match self {
             Self::OverrideReturn => write!(f, "bpf_override_return"),
             Self::WriteUser => write!(f, "bpf_probe_write_user"),
+            Self::SendSignal => write!(f, "bpf_send_signal"),
         }
     }
 }
@@ -121,15 +122,9 @@ fn main() {
     unsafe {
         rkchk_run_all_integ(fd).unwrap();
     }
-    // TODO : Set all the string and pointer in the event structures to direct buffer because otherwise we transmit the kernel pointer
     loop {
         let mut event = [event::Events::NoEvent];
         unsafe { rkchk_read_event(fd, &mut event).unwrap() };
-
-        // The device should return a type event
-        /*let event = unsafe {
-            std::mem::transmute::<[u8; std::mem::size_of::<Events>()], Events>(raw_event)
-        };*/
 
         println!("{}", event.get(0).unwrap());
     }

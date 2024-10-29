@@ -56,6 +56,8 @@ pub enum EBPFFuncType {
     OverrideReturn,
     /// Allow to write arbitrary data into an userspace buffer
     WriteUser,
+    /// Allow to send signal to a program
+    SendSignal,
 }
 /// Info
 pub struct HiddenFileInfo {
