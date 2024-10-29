@@ -57,6 +57,7 @@ use kernel::uaccess::UserSlice;
 use kernel::fprobe;
 use kernel::insn;
 use kernel::module;
+use kernel::uaccess::UserSliceReader;
 
 pub mod event;
 pub mod fx_hash;
@@ -257,12 +258,14 @@ struct UsermodehelperProbe;
 
 impl fprobe::FprobeOperations for UsermodehelperProbe {
     type Data = Arc<EventStack>;
+    type EntryData = ();
     /// Check only the module consistency
     fn entry_handler(
         data: ArcBorrow<'_, EventStack>,
         _entry_ip: usize,
         ret_ip: usize,
         regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         let pstr = regs.di as *const c_char;
 
@@ -294,6 +297,7 @@ impl fprobe::FprobeOperations for UsermodehelperProbe {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
     }
 }
@@ -302,12 +306,14 @@ struct CommitCredsProbe;
 
 impl fprobe::FprobeOperations for CommitCredsProbe {
     type Data = Arc<EventStack>;
+    type EntryData = ();
     /// Check only the module consistency
     fn entry_handler(
         data: ArcBorrow<'_, EventStack>,
         _entry_ip: usize,
         ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         match check_caller_consistency(ret_ip) {
             Err(_) => {
@@ -327,6 +333,7 @@ impl fprobe::FprobeOperations for CommitCredsProbe {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
     }
 }
@@ -335,6 +342,7 @@ struct KallsymsLookupNameProbe;
 
 impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
     type Data = Arc<EventStack>;
+    type EntryData = ();
     /// Check the module consistency
     /// Check that the symbol looked up for is in the blacklist or not
     fn entry_handler(
@@ -342,6 +350,7 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
         _entry_ip: usize,
         ret_ip: usize,
         regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         match check_caller_consistency(ret_ip) {
             Err(_) => {
@@ -375,6 +384,7 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
     }
 }
@@ -674,12 +684,13 @@ struct LoadModuleProbe;
 
 impl FprobeOperations for LoadModuleProbe {
     type Data = Arc<EventStack>;
-
+    type EntryData = ();
     fn entry_handler(
         data: ArcBorrow<'_, EventStack>,
         _entry_ip: usize,
         _ret_ip: usize,
         regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         let module = regs.di as *const bindings::module;
 
@@ -726,6 +737,7 @@ impl FprobeOperations for LoadModuleProbe {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
     }
 }
@@ -735,12 +747,14 @@ struct KSysDup3Probe;
 // This probe is for checking if someone try to map stdin/stdout to a socket
 impl FprobeOperations for KSysDup3Probe {
     type Data = Arc<EventStack>;
+    type EntryData = ();
 
     fn entry_handler(
         data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
         _entry_ip: usize,
         _ret_ip: usize,
         regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         let oldfd: i32 = regs.di as i32;
         let newfd: i32 = regs.si as i32;
@@ -774,6 +788,7 @@ impl FprobeOperations for KSysDup3Probe {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
     }
 }
@@ -781,22 +796,24 @@ impl FprobeOperations for KSysDup3Probe {
 struct CheckHelperCall;
 
 // This probe is for checking the function an eBPF programm is loading
-// We hook in a verifier function that is called at each call bpf instruction
+// We hook a bpf verifier's function that is called at each time a call bpf instruction is met
 // and log each time `bpf_probe_write_user` or `bpf_override_return` is called
 impl FprobeOperations for CheckHelperCall {
     type Data = Arc<EventStack>;
-
+    type EntryData = ();
     fn entry_handler(
         data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
         _entry_ip: usize,
         _ret_ip: usize,
         regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) -> Option<()> {
         let insn: *mut bindings::bpf_insn = regs.si as *mut bindings::bpf_insn;
         if insn.is_null() {
             return None;
         }
 
+        // We get the function id of the called function
         // SAFETY: The pointer is not null, we can dereference it
         let func_id = unsafe { (*insn).imm } as bindings::bpf_func_id;
 
@@ -822,7 +839,103 @@ impl FprobeOperations for CheckHelperCall {
         _entry_ip: usize,
         _ret_ip: usize,
         _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut ()>,
     ) {
+    }
+}
+
+struct SysGetDents64;
+
+impl SysGetDents64 {
+    fn check_hidden_file(mut dirp: UserSliceReader) -> Result<Option<ListArc<KEvents>>> {
+        while dirp.len() > 0 {
+            // We skip the two first field
+            let d_ino = dirp.read::<u64>()?;
+            pr_info!("We have d_ino : {}\n", d_ino);
+            dirp.skip(8)?;
+            // The field indicating the len of this entry
+            // This is the field tampered with by rootkits
+            let d_reclen: u16 = dirp.read::<u16>()?;
+            pr_info!("We have reclen : {}\n", d_reclen);
+            // Skip another field
+            dirp.skip(1)?;
+            let mut name_size: u16 = 1;
+            while dirp.read::<u8>()? != 0 {
+                name_size += 1;
+            }
+            // We calculate the size that should have the structure
+            // The 5 field don't have padding between them so it's just the addition of their size (which is 19)
+            let mut normal_size = name_size + 19;
+            // The structure is 8 aligned so we add the padding at the end if needed
+            let padding_size = if normal_size % 8 == 0 {
+                0
+            } else {
+                8 - (normal_size % 8)
+            };
+            dirp.skip(padding_size as usize)?;
+            normal_size += padding_size;
+
+            pr_info!("We have normal_size: {}\n", normal_size);
+
+            // This mean the reclen has been tampered with
+            if d_reclen != normal_size {
+                let kevent = KEvents::new(event::Events::HiddenFile(event::HiddenFileInfo {
+                    normal_size,
+                    d_reclen,
+                }))?;
+                return Ok(Some(kevent));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl FprobeOperations for SysGetDents64 {
+    type Data = Arc<EventStack>;
+    type EntryData = usize;
+
+    fn entry_handler(
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+        entry_data: Option<&mut usize>,
+    ) -> Option<()> {
+        if let Some(ptr) = entry_data {
+            let user_regs: *const bindings::pt_regs = regs.di as *const bindings::pt_regs;
+
+            if user_regs.is_null() {
+                return None;
+            }
+
+            let user_regs = unsafe { user_regs.read_unaligned() };
+            let dirp: usize = user_regs.si as usize;
+            *ptr = dirp;
+            Some(())
+        } else {
+            None
+        }
+    }
+    fn exit_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+        entry_data: Option<&mut usize>,
+    ) {
+        if let Some(dirp) = entry_data {
+            // The return of the syscall is the number of bytes written to the user buffer
+            let ret = regs.ax as usize;
+            if ret <= 0 {
+                return;
+            }
+            let dirp = UserSlice::new(*dirp, ret as usize).reader();
+            match Self::check_hidden_file(dirp) {
+                Err(_) => pr_info!("Error checking for hidden file\n"),
+                Ok(Some(kevent)) => data.push_event(kevent),
+                _ => (),
+            }
+        }
     }
 }
 
@@ -833,6 +946,7 @@ struct Probes {
     _load_module_probe: Pin<KBox<fprobe::Fprobe<LoadModuleProbe>>>,
     _ksys_dup3_probe: Pin<KBox<fprobe::Fprobe<KSysDup3Probe>>>,
     _check_helper_call: Pin<KBox<fprobe::Fprobe<CheckHelperCall>>>,
+    _sys_getdents64: Pin<KBox<fprobe::Fprobe<SysGetDents64>>>,
 }
 
 impl Probes {
@@ -865,6 +979,11 @@ impl Probes {
             GFP_KERNEL,
         )?;
 
+        let _sys_getdents64 = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("__x64_sys_getdents64"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+
         let probes = Probes {
             _usermodehelper_probe,
             _commit_creds_probe,
@@ -872,6 +991,7 @@ impl Probes {
             _load_module_probe,
             _ksys_dup3_probe,
             _check_helper_call,
+            _sys_getdents64,
         };
 
         Ok(probes)

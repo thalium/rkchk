@@ -80,6 +80,13 @@ impl Display for event::Events {
             Self::EBPFFunc(info) => {
                 write!(f, "An eBPF programm was loaded and is using a function that can tamper with user or kernel space :\n\tfunction: {}\n\ttgid: {}", info.func_type, info.tgid)
             }
+            Self::HiddenFile(info) => {
+                write!(
+                    f,
+                    "A hidden file was found : excpected size : {}, gotten size: {}",
+                    info.normal_size, info.d_reclen
+                )
+            }
             _ => {
                 write!(f, "To be implemented\n")
             }

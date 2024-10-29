@@ -57,6 +57,13 @@ pub enum EBPFFuncType {
     /// Allow to write arbitrary data into an userspace buffer
     WriteUser,
 }
+/// Info
+pub struct HiddenFileInfo {
+    /// Expected size
+    pub normal_size: u16,
+    /// Gotten size
+    pub d_reclen: u16,
+}
 
 /// Info about a function being analysed by the verifier
 pub struct EBPFFuncInfo {
@@ -92,4 +99,6 @@ pub enum Events {
     /// An eBPF program with a function altering user or kernel memory
     /// function is being loaded
     EBPFFunc(EBPFFuncInfo),
+    /// An hidden file has been found
+    HiddenFile(HiddenFileInfo),
 }

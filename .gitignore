@@ -6,3 +6,7 @@ modules.order
 *.mod
 *.mod.c
 user/target
+kernel/abstraction
+*.json
+kernel/simple_value.rs
+
