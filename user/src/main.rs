@@ -1,11 +1,15 @@
-use std::borrow::Borrow;
-use std::fmt::Display;
-use std::num;
-
 use nix;
+use nix::errno::Errno;
 use nix::fcntl;
 use nix::libc::pid_t;
+use nix::sys::signal;
+use nix::sys::signal::Signal::SIGKILL;
 use nix::sys::stat::Mode;
+use nix::unistd::Pid;
+use std::borrow::Borrow;
+use std::ffi::{CStr, CString};
+use std::fmt::{write, Display};
+use std::num;
 const RKCHK_IOC_MAGIC: u8 = b'j';
 const RKCHK_INTEG_ALL_NR: u8 = 1;
 const RKCHK_READ_EVENT_NR: u8 = 2;
@@ -170,6 +174,60 @@ fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
     }
 }
 
+pub trait Threat
+where
+    Self: Display,
+{
+    fn remove(&self) {
+        println!("To be implemented....\n");
+    }
+}
+
+struct LKM {
+    events: Vec<event::Events>,
+    name: Vec<u8>,
+}
+
+impl Display for LKM {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Suspicious module : {:?}\n", self.name)
+    }
+}
+
+impl Threat for LKM {
+    fn remove(&self) {
+        // We know that the name contain only ascii character and
+        // end with a null character.
+        let name = CStr::from_bytes_until_nul(&self.name).unwrap();
+        // Do the equivalent of `rmmod --force`
+        if let Err(err) = nix::kmod::delete_module(
+            &name,
+            nix::kmod::DeleteModuleFlags::O_TRUNC | nix::kmod::DeleteModuleFlags::O_NONBLOCK,
+        ) {
+            println!("Error unloading the module {:?} : {err}", name);
+        }
+    }
+}
+
+struct Process {
+    events: Vec<event::Events>,
+    tgid: pid_t,
+}
+
+impl Display for Process {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Suspicious process of pid : {}\n", self.tgid)
+    }
+}
+
+impl Threat for Process {
+    fn remove(&self) {
+        if let Err(_) = signal::kill(Pid::from_raw(self.tgid), Some(SIGKILL)) {
+            println!("Failed to remove process of pid {}\n", self.tgid);
+        }
+    }
+}
+
 pub mod event;
 fn main() {
     let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
@@ -185,6 +243,13 @@ fn main() {
 
     if let Some(pid_list) = suspect_pid {
         println!("Found some suspect_pid : {:?}\n", pid_list);
+        for pid in pid_list {
+            let threat = Process {
+                events: Vec::new(),
+                tgid: pid as _,
+            };
+            threat.remove();
+        }
     }
 
     loop {

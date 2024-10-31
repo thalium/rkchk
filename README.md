@@ -86,7 +86,61 @@ Function checked :
 - `ip_rcv` (used by Reptile)
 - `tcp4_seq_show` (used by Reptile)
 
+## 8 - File hiding
 
+Most of the rootkit offer a way to hide files. The most common way to hide file is to hook the `getdents64` syscall (used to get the list of the files present in a directory) and modify the buffer it return. 
+
+The buffer returned by `getdents64` is an array of `struct linux_dirent64`. Containing the following entry : 
+
+```C
+struct linux_dirent64 {
+    ino64_t        d_ino;    /* 64-bit inode number */
+    off64_t        d_off;    /* 64-bit offset to next structure */
+    unsigned short d_reclen; /* Size of this dirent */
+    unsigned char  d_type;   /* File type */
+    char           d_name[]; /* Filename (null-terminated) */
+};
+```
+The `d_reclen` give the size of the current `linux_dirent64` entry and is used to jump to the following entry. 
+So we can hide an entry by modifying the field `d_reclen` of the precedent entry to be the size of the hidden entry and the precedent entry. 
+
+We can detect the tampering of the returned buffer by checking that each structure has the size of it's `d_reclen`. If not the buffer has been tampered with and we can retreive the name of the hidden file (if it wasn't overwrote). 
+
+## 9 - Process Hiding
+
+A very simple way of hiding process is by hiding `/proc/<pid>` directory for each `pid` we want to hide using the technique described in (8).
+
+We can detect hidden process by the technique in (8). 
+But a more robust way is by iterating through the linked list of `task_struct` in the kernel. 
+Because a process want to be scheduled it need to be in this list so it's quite difficult for a rootkit to remove a process from this list and make so that the process still run.
+
+## 10 - Write capable eBPF helper usage
+
+eBPF programms are very limited in terms of write capacity. 
+They can't write directly to pointer they receive (from kernel or userspace). 
+The only way they have to modify user or kernel data is through a limited number of helpers : 
+- `bpf_probe_write_user` : allow to write data to an user pointer
+- `bpf_override_return` : allow to override the return value of a hooked function
+
+We can detect the usage of thoses function during the verifying step of the eBPF program loading process. 
+We hook into `check_helper_call` which is called for each function the verifier encounter. 
+This allow us to check if a programm contains helper capable of modifying it's environment.
+
+# Available response
+
+We can respond to the threat we detect.
+
+## LKM 
+
+The suspicious LKM are identified by their name.
+The available response is the equivalent of a `rmmod --force <name_module>`.
+
+## eBPF
+
+Most eBPF programs are linked to an userspace program so the most efficient way to unload an eBPF rootkit is to end it's asociated process.
+The available response is the equivalent of a `kill -9 <pid>`.
+
+(this response is also useful against suspect process, for example hidden one by a rootkit).
 
 # Rootkit tested and detected
 

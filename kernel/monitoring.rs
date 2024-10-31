@@ -342,7 +342,7 @@ impl FprobeOperations for KSysDup3Probe {
             if newfd == 1 || newfd == 0 {
                 let event = event::Events::StdioToSocket(ProcessInfo {
                     // SAFETY: while this function execute this task exist
-                    tgid: unsafe { Task::current() }.pid() as i32,
+                    tgid: unsafe { Task::current() }.tgid_nr_ns(None) as i32,
                 });
                 match KEvents::new(event) {
                     Err(_) => pr_info!("Error trying to push a new event\n"),
