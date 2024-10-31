@@ -1,11 +1,16 @@
-use std::fmt::{write, Display};
+use std::borrow::Borrow;
+use std::fmt::Display;
+use std::num;
 
 use nix;
 use nix::fcntl;
+use nix::libc::pid_t;
 use nix::sys::stat::Mode;
 const RKCHK_IOC_MAGIC: u8 = b'j';
 const RKCHK_INTEG_ALL_NR: u8 = 1;
 const RKCHK_READ_EVENT_NR: u8 = 2;
+const RKCHK_NUMBER_TASK_NR: u32 = 3;
+const RKCHK_PID_LIST_NR: u32 = 4;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read_buf!(
     rkchk_read_event,
@@ -13,6 +18,13 @@ nix::ioctl_read_buf!(
     RKCHK_READ_EVENT_NR,
     event::Events
 );
+nix::ioctl_read!(
+    rkchk_number_task,
+    RKCHK_IOC_MAGIC,
+    RKCHK_NUMBER_TASK_NR,
+    usize
+);
+nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
 
 impl Display for event::Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -113,6 +125,51 @@ impl Display for event::EBPFFuncType {
     }
 }
 
+fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
+    let read_dir = std::fs::read_dir("/proc/")?;
+
+    let mut suspect_pid: Vec<pid_t> = Vec::new();
+
+    let proc_pid_vec: Vec<pid_t> = read_dir
+        .filter_map(|dir_entry| -> Option<pid_t> {
+            if let Ok(dir_entry) = dir_entry {
+                if let Ok(dir_str) = dir_entry.file_name().into_string() {
+                    if let Ok(pid) = dir_str.parse::<pid_t>() {
+                        return Some(pid);
+                    }
+                }
+            }
+            return None;
+        })
+        .collect();
+
+    let mut number_task: usize = 0;
+
+    unsafe { rkchk_number_task(fd, &mut number_task as *mut usize) }.unwrap();
+
+    let mut pid_list = [0_i32; 300];
+
+    unsafe { rkchk_pid_list(fd, &mut pid_list) }.unwrap();
+
+    for pid in pid_list {
+        // The pid 0 exit in kernel but is not shown in the /proc
+        // virtual filesystem
+        if pid == 0 {
+            continue;
+        }
+
+        if !proc_pid_vec.contains(&pid) {
+            suspect_pid.push(pid);
+        }
+    }
+
+    if suspect_pid.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(suspect_pid))
+    }
+}
+
 pub mod event;
 fn main() {
     let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
@@ -122,6 +179,14 @@ fn main() {
     unsafe {
         rkchk_run_all_integ(fd).unwrap();
     }
+
+    println!("Checking for hidden process\n");
+    let suspect_pid = check_hidden_process(fd).unwrap();
+
+    if let Some(pid_list) = suspect_pid {
+        println!("Found some suspect_pid : {:?}\n", pid_list);
+    }
+
     loop {
         let mut event = [event::Events::NoEvent];
         unsafe { rkchk_read_event(fd, &mut event).unwrap() };

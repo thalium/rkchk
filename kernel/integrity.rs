@@ -20,6 +20,8 @@ use kernel::sync::Arc;
 
 use kernel::insn;
 use kernel::module;
+use kernel::types::ARef;
+use kernel::uaccess::UserSliceWriter;
 
 use crate::event;
 use crate::fx_hash;
@@ -334,6 +336,22 @@ impl CFIntegrity {
         }
         Ok(())
     }
+}
+/// Fill the user buffer with the list of all the pid
+pub fn fill_pid_list(buffer: &mut UserSliceWriter) -> Result<usize> {
+    let current = ARef::from(current!());
+    let mut nb = 0;
+
+    for task in current {
+        buffer.write::<bindings::pid_t>(&task.tgid_nr_ns(None))?;
+        nb += 1;
+    }
+    Ok(nb)
+}
+/// Return the number of tasks struct running in the kernel
+pub fn number_tasks() -> usize {
+    let current = ARef::from(current!());
+    current.into_iter().count()
 }
 
 /// Hold all the instance of the structures used to

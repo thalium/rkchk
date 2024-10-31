@@ -421,13 +421,10 @@ impl SysGetDents64 {
     fn check_hidden_file(mut dirp: UserSliceReader) -> Result<Option<ListArc<KEvents>>> {
         while dirp.len() > 0 {
             // We skip the two first field
-            let d_ino = dirp.read::<u64>()?;
-            pr_info!("We have d_ino : {}\n", d_ino);
-            dirp.skip(8)?;
+            dirp.skip(16)?;
             // The field indicating the len of this entry
             // This is the field tampered with by rootkits
             let d_reclen: u16 = dirp.read::<u16>()?;
-            pr_info!("We have reclen : {}\n", d_reclen);
             // Skip another field
             dirp.skip(1)?;
             let mut name_size: u16 = 1;
@@ -445,8 +442,6 @@ impl SysGetDents64 {
             };
             dirp.skip(padding_size as usize)?;
             normal_size += padding_size;
-
-            pr_info!("We have normal_size: {}\n", normal_size);
 
             // This mean the reclen has been tampered with
             if d_reclen != normal_size {

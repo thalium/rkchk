@@ -41,7 +41,15 @@ const RKCHK_INTEG_ALL: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 const RKCHK_READ_EVENT_NR: u32 = 2;
 /// Read new events (ioctl command)
 const RKCHK_READ_EVENT: u32 = _IOR::<event::Events>(RKCHK_IOC_MAGIC, RKCHK_READ_EVENT_NR);
-
+/// Read number task_struct (ioctl sequence number)
+const RKCHK_NUMBER_TASK_NR: u32 = 3;
+/// Read number task_stuct (ioctl command)
+const RKCHK_NUMBER_TASK: u32 = _IOR::<usize>(RKCHK_IOC_MAGIC, RKCHK_NUMBER_TASK_NR);
+/// Read all pid (ioctl sequence number)
+const RKCHK_PID_LIST_NR: u32 = 4;
+/// Read all pid (ioctl command)
+const RKCHK_PID_LIST: u32 =
+    _IOR::<[kernel::bindings::pid_t; 300]>(RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR);
 static mut EVENT_STACK: Option<Arc<EventStack>> = None;
 
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
@@ -168,6 +176,15 @@ impl MiscDevice for Communication {
         let size = _IOC_SIZE(cmd);
         let user_slice = UserSlice::new(arg, size);
         match cmd {
+            RKCHK_NUMBER_TASK => {
+                user_slice.writer().write(&number_tasks())?;
+                Ok(core::mem::size_of::<usize>() as _)
+            }
+            RKCHK_PID_LIST => {
+                let mut writer = user_slice.writer();
+                let nb = fill_pid_list(&mut writer)?;
+                Ok((core::mem::size_of::<kernel::bindings::pid_t>() * nb) as _)
+            }
             RKCHK_INTEG_ALL => {
                 data.integrity_check.function_integ.check_functions()?;
 
@@ -202,6 +219,7 @@ impl MiscDevice for Communication {
 
                 Ok(core::mem::size_of::<event::Events>() as _)
             }
+
             _ => Err(ENOTTY),
         }
     }
