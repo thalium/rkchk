@@ -44,11 +44,13 @@ pub struct FunctionInfo {
     pub name: [u8; SIZE_STRING],
 }
 
+#[repr(C)]
 /// Information about a process
 pub struct ProcessInfo {
     /// TGID of the process
     pub tgid: i32,
 }
+#[repr(C)]
 /// eBPF function capable of modifing kernel or
 pub enum EBPFFuncType {
     /// Function usable in KPROBE type of program
@@ -59,6 +61,7 @@ pub enum EBPFFuncType {
     /// Allow to send signal to a program
     SendSignal,
 }
+#[repr(C)]
 /// Info
 pub struct HiddenFileInfo {
     /// Expected size
@@ -67,12 +70,31 @@ pub struct HiddenFileInfo {
     pub d_reclen: u16,
 }
 
+#[repr(C)]
 /// Info about a function being analysed by the verifier
 pub struct EBPFFuncInfo {
     /// TGID of the program that called he verifier
     pub tgid: i32,
     /// Suspicious function that was called
     pub func_type: EBPFFuncType,
+}
+
+/// Type of suspicious environment variable
+#[repr(C)]
+pub enum EnvType {
+    /// LD_PRELOAD
+    LDPreload,
+    /// LD_LIBRARY_PATH
+    LDLibraryPath,
+}
+
+/// Info about suspicious environment variable
+#[repr(C)]
+pub struct EnvInfo {
+    /// Type
+    pub env_type: EnvType,
+    /// Path
+    pub path: [u8; SIZE_STRING],
 }
 
 /// Type of event that can be triggered
@@ -103,4 +125,6 @@ pub enum Events {
     EBPFFunc(EBPFFuncInfo),
     /// An hidden file has been found
     HiddenFile(HiddenFileInfo),
+    /// A suspicious envirronement variable was found
+    EnvPreload(EnvInfo),
 }

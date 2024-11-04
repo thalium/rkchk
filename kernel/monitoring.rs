@@ -35,6 +35,7 @@ use kernel::module;
 use kernel::uaccess::UserSliceReader;
 
 use crate::event;
+use crate::event::EnvType;
 use crate::fx_hash;
 use crate::EventStack;
 use crate::KEvents;
@@ -474,6 +475,7 @@ impl FprobeOperations for SysGetDents64 {
                 return None;
             }
 
+            // SAFETY: The pointer is not null, aligned and point to an initialized structure
             let user_regs = unsafe { user_regs.read_unaligned() };
             let dirp: usize = user_regs.si as usize;
             *ptr = dirp;
@@ -505,6 +507,195 @@ impl FprobeOperations for SysGetDents64 {
     }
 }
 
+/// Copy a string pointed to by a user pointer
+///
+/// # Safety:
+///     The pointer should be `NULL` or point to a valid `null terminated` C string
+/// # Return:
+///     - Ok(None) if the pointer is null
+///     - Ok(Some(vec)) if the copy is successfull, vec containing the null terminated string
+///     - Err(_) if there was an allocation or user pointer read error
+unsafe fn copy_string_from_user(user_str: *const c_char) -> Result<Option<KVec<u8>>> {
+    let mut vec = KVec::new();
+    pr_info!("At least one env!\n");
+    if user_str.is_null() {
+        return Ok(None);
+    }
+
+    let mut i = 0;
+    // Loop invariant : we exit at the first encountered null character
+    loop {
+        // SAFETY: The count of the .add() method if always valid because the string is `null terminated`
+        // therefor while we are in the loop a null character hasn't been hit
+        let mut user_slice =
+            UserSlice::new(unsafe { user_str.add(i) } as usize, size_of::<u8>()).reader();
+        let char = user_slice.read::<u8>()?;
+        vec.push(char, GFP_KERNEL)?;
+
+        if char == 0 {
+            break;
+        }
+        i += 1;
+    }
+
+    Ok(Some(vec))
+}
+
+const SUS_ENV: [(&CStr, EnvType); 2] = [
+    (c_str!("LD_PRELOAD="), EnvType::LDPreload),
+    (c_str!("LD_LIBRARY_PATH="), EnvType::LDLibraryPath),
+];
+
+/// Verify the presence of certain environement variable
+/// in the envp vector:
+/// - LD_PRELOAD
+/// - LD_LIBRARY_PATH
+/// # Safety:
+///     The pointer should be `NULL` or point to a valid `null terminated` array
+///     of C null terminated string
+/// # Return:
+///     - `Ok(None)` if the pointer is null or no events detected
+///     - `Ok(Some(_))` if successfull, kevent being a detected event
+///     - `Err(_)` if there was an allocation or user pointer read error
+#[cfg(target_arch = "x86_64")]
+unsafe fn check_envp(envp: *const *const c_char) -> Result<Option<ListArc<KEvents>>> {
+    if envp.is_null() {
+        return Ok(None);
+    }
+
+    pr_info!("Non null env!\n");
+    let mut i = 0;
+    // Loop invariant: We exit at the first encountered null pointer value
+    loop {
+        let mut user_slice =
+            // We read the array, one item at the time
+            // SAFETY: We know that the vector end with a null pointer 
+            // and we exit at the first null pointer
+            UserSlice::new(unsafe { envp.add(i) } as usize, size_of::<usize>()).reader();
+        let user_str = user_slice.read::<usize>()? as *const c_char;
+
+        // SAFETY: According to the safety contract of the function
+        // the pointer is null or point to a null terminated string
+        if let Some(vec) = unsafe { copy_string_from_user(user_str)? } {
+            for (env, env_type) in SUS_ENV {
+                if vec.starts_with(env.as_bytes()) {
+                    let (_, path) = vec
+                        .split_at_checked(env.len())
+                        .ok_or(kernel::error::code::EAGAIN)?;
+
+                    let mut event = event::EnvInfo {
+                        env_type,
+                        path: [0_u8; event::SIZE_STRING],
+                    };
+
+                    let (path_dst, _) = event
+                        .path
+                        .split_at_mut_checked(path.len())
+                        .ok_or(kernel::error::code::EAGAIN)?;
+
+                    // This won't panic because by construction
+                    // `path` and `path_dst` are of the same size
+                    path_dst.copy_from_slice(path);
+
+                    let kevent = KEvents::new(event::Events::EnvPreload(event))?;
+
+                    return Ok(Some(kevent));
+                }
+            }
+        } else {
+            break;
+        }
+        // We advance in the array
+        i += 1;
+    }
+
+    Ok(None)
+}
+
+struct SysExecve;
+
+impl FprobeOperations for SysExecve {
+    type Data = Arc<EventStack>;
+    type EntryData = ();
+
+    fn entry_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+        _entry_data: Option<&mut Self::EntryData>,
+    ) -> Option<()> {
+        pr_info!("We are here!!!\n");
+        let user_regs: *const bindings::pt_regs = regs.di as _;
+
+        if user_regs.is_null() {
+            return None;
+        }
+
+        // SAFETY: Pointer not null, aligned and point to an initialized structure
+        let envp: *const *const c_char = unsafe { (*user_regs).dx } as _;
+
+        // SAFETY: The envp point to the envirronment variable array
+        // which have all the wanted property
+        match unsafe { check_envp(envp) } {
+            Err(err) => pr_info!("Error checking envp : {:?}\n", err),
+            Ok(Some(kevent)) => data.push_event(kevent),
+            _ => pr_info!("No luck!\n"),
+        }
+        None
+    }
+    fn exit_handler(
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut Self::EntryData>,
+    ) {
+    }
+}
+
+struct SysExecveat;
+
+impl FprobeOperations for SysExecveat {
+    type Data = Arc<EventStack>;
+    type EntryData = ();
+
+    fn entry_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        regs: &bindings::pt_regs,
+        _entry_data: Option<&mut Self::EntryData>,
+    ) -> Option<()> {
+        pr_info!("We are here !!!\n");
+        let user_regs: *const bindings::pt_regs = regs.di as _;
+
+        if user_regs.is_null() {
+            return None;
+        }
+
+        // SAFETY: Pointer not null, aligned and point to an initialized structure
+        let envp: *const *const c_char = unsafe { (*user_regs).r10 } as _;
+
+        // SAFETY: The envp point to the envirronment variable array
+        // which have all the wanted property
+        match unsafe { check_envp(envp) } {
+            Err(err) => pr_info!("Error checking envp : {:?}\n", err),
+            Ok(Some(kevent)) => data.push_event(kevent),
+            _ => pr_info!("No luck\n"),
+        }
+        None
+    }
+    fn exit_handler(
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
+        _regs: &bindings::pt_regs,
+        _entry_data: Option<&mut Self::EntryData>,
+    ) {
+    }
+}
+
 /// Used to hold all the structure representing the probes placed in the kernel
 pub struct Probes {
     _usermodehelper_probe: Pin<KBox<fprobe::Fprobe<UsermodehelperProbe>>>,
@@ -514,6 +705,8 @@ pub struct Probes {
     _ksys_dup3_probe: Pin<KBox<fprobe::Fprobe<KSysDup3Probe>>>,
     _check_helper_call: Pin<KBox<fprobe::Fprobe<CheckHelperCall>>>,
     _sys_getdents64: Pin<KBox<fprobe::Fprobe<SysGetDents64>>>,
+    _sys_execve: Pin<KBox<fprobe::Fprobe<SysExecve>>>,
+    _sys_execveat: Pin<KBox<fprobe::Fprobe<SysExecveat>>>,
 }
 
 impl Probes {
@@ -533,6 +726,7 @@ impl Probes {
             fprobe::Fprobe::new(c_str!("kallsyms_lookup_name"), None, events.clone()),
             GFP_KERNEL,
         )?;
+
         let _load_module_probe = KBox::pin_init(
             fprobe::Fprobe::new(c_str!("do_init_module"), None, events.clone()),
             GFP_KERNEL,
@@ -552,6 +746,16 @@ impl Probes {
             GFP_KERNEL,
         )?;
 
+        let _sys_execve = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("__x64_sys_execve"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+
+        let _sys_execveat = KBox::pin_init(
+            fprobe::Fprobe::new(c_str!("__x64_sys_execveat"), None, events.clone()),
+            GFP_KERNEL,
+        )?;
+
         let probes = Probes {
             _usermodehelper_probe,
             _commit_creds_probe,
@@ -560,6 +764,8 @@ impl Probes {
             _ksys_dup3_probe,
             _check_helper_call,
             _sys_getdents64,
+            _sys_execve,
+            _sys_execveat,
         };
 
         Ok(probes)

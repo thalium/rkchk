@@ -9,7 +9,6 @@ use nix::unistd::Pid;
 use std::borrow::Borrow;
 use std::ffi::{CStr, CString};
 use std::fmt::{write, Display};
-use std::num;
 const RKCHK_IOC_MAGIC: u8 = b'j';
 const RKCHK_INTEG_ALL_NR: u8 = 1;
 const RKCHK_READ_EVENT_NR: u8 = 2;
@@ -103,9 +102,27 @@ impl Display for event::Events {
                     info.normal_size, info.d_reclen
                 )
             }
+            Self::EnvPreload(info) => {
+                write!(
+                    f,
+                    "A process was executed with an suspicious environment variable:\n\tvariable: {}\n\tpath: {:?}", 
+                    info.env_type, 
+                    // The string provided by the LKM are valid ASCII null terminated string
+                    CStr::from_bytes_until_nul(&info.path).unwrap() ,
+                )
+            }
             _ => {
                 write!(f, "To be implemented\n")
             }
+        }
+    }
+}
+
+impl Display for event::EnvType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LDLibraryPath => write!(f, "LD_LIBRARY_PATH"),
+            Self::LDPreload => write!(f, "LD_PRELOAD"),
         }
     }
 }
