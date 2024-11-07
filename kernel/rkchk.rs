@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#![recursion_limit = "256"]
+
 //! Rust character device sample.
 use core::clone::Clone;
 use core::ptr::addr_of;
@@ -247,7 +249,7 @@ impl kernel::Module for RootkitDetection {
             }
         };
         // Setting up the probes
-        let _probe = Arc::new(Probes::init(event_stack.clone())?, GFP_KERNEL)?;
+        let _probe = Probes::init(event_stack.clone())?;
 
         let _integrity_check = Arc::new(IntegrityCheck::init(event_stack.clone())?, GFP_KERNEL)?;
 

@@ -517,7 +517,6 @@ impl FprobeOperations for SysGetDents64 {
 ///     - Err(_) if there was an allocation or user pointer read error
 unsafe fn copy_string_from_user(user_str: *const c_char) -> Result<Option<KVec<u8>>> {
     let mut vec = KVec::new();
-    pr_info!("At least one env!\n");
     if user_str.is_null() {
         return Ok(None);
     }
@@ -563,7 +562,6 @@ unsafe fn check_envp(envp: *const *const c_char) -> Result<Option<ListArc<KEvent
         return Ok(None);
     }
 
-    pr_info!("Non null env!\n");
     let mut i = 0;
     // Loop invariant: We exit at the first encountered null pointer value
     loop {
@@ -625,7 +623,6 @@ impl FprobeOperations for SysExecve {
         regs: &bindings::pt_regs,
         _entry_data: Option<&mut Self::EntryData>,
     ) -> Option<()> {
-        pr_info!("We are here!!!\n");
         let user_regs: *const bindings::pt_regs = regs.di as _;
 
         if user_regs.is_null() {
@@ -640,7 +637,7 @@ impl FprobeOperations for SysExecve {
         match unsafe { check_envp(envp) } {
             Err(err) => pr_info!("Error checking envp : {:?}\n", err),
             Ok(Some(kevent)) => data.push_event(kevent),
-            _ => pr_info!("No luck!\n"),
+            _ => (),
         }
         None
     }
@@ -667,7 +664,6 @@ impl FprobeOperations for SysExecveat {
         regs: &bindings::pt_regs,
         _entry_data: Option<&mut Self::EntryData>,
     ) -> Option<()> {
-        pr_info!("We are here !!!\n");
         let user_regs: *const bindings::pt_regs = regs.di as _;
 
         if user_regs.is_null() {
@@ -682,7 +678,7 @@ impl FprobeOperations for SysExecveat {
         match unsafe { check_envp(envp) } {
             Err(err) => pr_info!("Error checking envp : {:?}\n", err),
             Ok(Some(kevent)) => data.push_event(kevent),
-            _ => pr_info!("No luck\n"),
+            _ => (),
         }
         None
     }
@@ -696,78 +692,40 @@ impl FprobeOperations for SysExecveat {
     }
 }
 
-/// Used to hold all the structure representing the probes placed in the kernel
-pub struct Probes {
-    _usermodehelper_probe: Pin<KBox<fprobe::Fprobe<UsermodehelperProbe>>>,
-    _commit_creds_probe: Pin<KBox<fprobe::Fprobe<CommitCredsProbe>>>,
-    _kallsyms_lookup_name_probe: Pin<KBox<fprobe::Fprobe<KallsymsLookupNameProbe>>>,
-    _load_module_probe: Pin<KBox<fprobe::Fprobe<LoadModuleProbe>>>,
-    _ksys_dup3_probe: Pin<KBox<fprobe::Fprobe<KSysDup3Probe>>>,
-    _check_helper_call: Pin<KBox<fprobe::Fprobe<CheckHelperCall>>>,
-    _sys_getdents64: Pin<KBox<fprobe::Fprobe<SysGetDents64>>>,
-    _sys_execve: Pin<KBox<fprobe::Fprobe<SysExecve>>>,
-    _sys_execveat: Pin<KBox<fprobe::Fprobe<SysExecveat>>>,
+macro_rules! probes {
+    ($(probe $func:ident => $structure:ty );*) => {
+        #[pin_data]
+        /// Gather all the Fprobe structure for lifetime reason
+        pub struct Probes {
+            $(
+            #[allow(dead_code)]
+            #[pin]
+            $func : kernel::fprobe::Fprobe<$structure>,
+            )*
+        }
+
+        impl Probes {
+            /// Create a new Arc instance of Probes gathering all the Fprobe structure
+            pub fn init(events: Arc<$crate::EventStack>) -> Result<Arc<Self>> {
+                Arc::pin_init(
+                    try_pin_init!(Probes {
+                        $(
+                        $func <- kernel::fprobe::Fprobe::<$structure>::new(c_str!(stringify!($func)), None, events.clone()) ,
+                        )*
+                    }),
+                    GFP_KERNEL,
+                )
+            }
+        }
+    };
 }
 
-impl Probes {
-    /// Create a new instance
-    pub fn init(events: Arc<EventStack>) -> Result<Self> {
-        pr_info!("Registering probes\n");
-
-        let _usermodehelper_probe = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("call_usermodehelper"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-        let _commit_creds_probe = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("commit_creds"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-        let _kallsyms_lookup_name_probe = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("kallsyms_lookup_name"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let _load_module_probe = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("do_init_module"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-        let _ksys_dup3_probe = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("ksys_dup3"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let _check_helper_call = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("check_helper_call"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let _sys_getdents64 = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("__x64_sys_getdents64"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let _sys_execve = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("__x64_sys_execve"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let _sys_execveat = KBox::pin_init(
-            fprobe::Fprobe::new(c_str!("__x64_sys_execveat"), None, events.clone()),
-            GFP_KERNEL,
-        )?;
-
-        let probes = Probes {
-            _usermodehelper_probe,
-            _commit_creds_probe,
-            _kallsyms_lookup_name_probe,
-            _load_module_probe,
-            _ksys_dup3_probe,
-            _check_helper_call,
-            _sys_getdents64,
-            _sys_execve,
-            _sys_execveat,
-        };
-
-        Ok(probes)
-    }
-}
+probes!(probe call_usermodehelper => UsermodehelperProbe;
+        probe commit_creds => CommitCredsProbe;
+        probe kallsyms_lookup_name => KallsymsLookupNameProbe;
+        probe do_init_module => LoadModuleProbe;
+        probe ksys_dup3 => KSysDup3Probe;
+        probe check_helper_call => CheckHelperCall;
+        probe __x64_sys_getdents64 => SysGetDents64;
+        probe __x64_sys_execve => SysExecve;
+        probe __x64_sys_execveat => SysExecveat);
