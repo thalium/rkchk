@@ -1,7 +1,7 @@
 use nix;
 use nix::errno::Errno;
 use nix::fcntl;
-use nix::libc::pid_t;
+use nix::libc::{pid_t, sleep};
 use nix::sys::signal;
 use nix::sys::signal::Signal::SIGKILL;
 use nix::sys::stat::Mode;
@@ -9,11 +9,17 @@ use nix::unistd::Pid;
 use std::borrow::Borrow;
 use std::ffi::{CStr, CString};
 use std::fmt::{write, Display};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+use std::{fs, thread};
+use std::str::FromStr;
+use std::sync::Arc;
 const RKCHK_IOC_MAGIC: u8 = b'j';
 const RKCHK_INTEG_ALL_NR: u8 = 1;
 const RKCHK_READ_EVENT_NR: u8 = 2;
 const RKCHK_NUMBER_TASK_NR: u32 = 3;
 const RKCHK_PID_LIST_NR: u32 = 4;
+const RKCHK_TRACED_LIST_NR: u32 = 5;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read_buf!(
     rkchk_read_event,
@@ -28,6 +34,9 @@ nix::ioctl_read!(
     usize
 );
 nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
+nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
+
+
 
 impl Display for event::Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -90,7 +99,8 @@ impl Display for event::Events {
             }
             Self::TamperedMSR => write!(f, "An MSR (CR0 or CR4 or LSTAR) was tampered with"),
             Self::StdioToSocket(info) => {
-                write!(f, "Somone mapped stadanrd I/O to a socket\nThis is a common technique to open reverse shell\n\ttgid: {}", info.tgid)
+                //write!(f, "Somone mapped stadanrd I/O to a socket\nThis is a common technique to open reverse shell\n\ttgid: {}", info.tgid)
+                write!(f, "Mapped I/O on a socket (mostly false positive)")
             }
             Self::EBPFFunc(info) => {
                 write!(f, "An eBPF programm was loaded and is using a function that can tamper with user or kernel space :\n\tfunction: {}\n\ttgid: {}", info.func_type, info.tgid)
@@ -191,6 +201,47 @@ fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
     }
 }
 
+fn check_ftrace_hook(fd: i32 ) -> std::io::Result<Option<Vec<String>>> {
+    // This file list all the traced functions using kernel hooks
+    let content = fs::read_to_string("/sys/kernel/debug/tracing/enabled_functions")?;
+
+    let mut rkchk_functions = [[0_u8; event::SIZE_STRING]; 20];
+
+    unsafe { rkchk_traced_list(fd, &mut rkchk_functions) }.unwrap();
+
+    let mut rkchk_function_vec : Vec<String> = Vec::new();
+
+    for fct in rkchk_functions {
+        // It's a tab of 100 so there is a first element
+        if *fct.get(0).unwrap() != 0 {
+            let mut string_fct = String::from_utf8_lossy(&fct).into_owned();
+            string_fct.retain(|c| c!= '\0');
+            rkchk_function_vec.push(string_fct);
+        }
+    }
+
+    println!("We have the traced function by rkchk being: \n {:?}", rkchk_function_vec);
+
+    let mut res = Vec::new();
+
+    for line in content.lines() {
+        if let Some(fct_name) = line.split_ascii_whitespace().next() {
+            let fct_name = String::from_str(fct_name).unwrap();
+            if !rkchk_function_vec.contains(&fct_name) {
+                res.push(fct_name);
+            }
+        }
+    }
+
+
+    if res.is_empty() {
+        Ok(None)
+    }
+    else {
+        Ok(Some(res))
+    }
+}
+
 pub trait Threat
 where
     Self: Display,
@@ -245,19 +296,35 @@ impl Threat for Process {
     }
 }
 
-pub mod event;
-fn main() {
-    let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
-
-    println!("Running all the integrity checks\n");
-
+fn run_integrity_check(fd: i32) {
+    println!("Running all the integrity checks");
     unsafe {
         rkchk_run_all_integ(fd).unwrap();
     }
 
-    println!("Checking for hidden process\n");
-    let suspect_pid = check_hidden_process(fd).unwrap();
+    
 
+    println!("Checking for traced functions");
+    let traced_functions = check_ftrace_hook(fd).unwrap();
+    if let Some(traced_function) = traced_functions {
+        println!("Found traced functions:");
+        for fct in traced_function {
+            println!("{fct}");
+        }
+    }
+}
+
+
+pub mod event;
+fn main() {
+    let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
+
+    let term = Arc::new(AtomicBool::new(false));    
+
+    let term_thread = term.clone();
+    
+    println!("Checking for hidden process");
+    let suspect_pid = check_hidden_process(fd).unwrap();
     if let Some(pid_list) = suspect_pid {
         println!("Found some suspect_pid : {:?}\n", pid_list);
         for pid in pid_list {
@@ -269,10 +336,25 @@ fn main() {
         }
     }
 
-    loop {
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term)).unwrap();
+
+    let thread_handle = thread::spawn(move || {
+        while !term_thread.load(std::sync::atomic::Ordering::Relaxed) { 
+            run_integrity_check(fd);
+            std::thread::sleep(Duration::new(5, 0));
+        }
+    });
+
+    while !term.load(std::sync::atomic::Ordering::Relaxed) {
         let mut event = [event::Events::NoEvent];
         unsafe { rkchk_read_event(fd, &mut event).unwrap() };
+        
+        match event {
+            [event::Events::StdioToSocket(_)] => (),
+            _ => println!("{}", event.get(0).unwrap()),
 
-        println!("{}", event.get(0).unwrap());
+        };
     }
+    thread_handle.join().unwrap();
+    nix::unistd::close(fd).unwrap();
 }

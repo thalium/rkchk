@@ -24,10 +24,12 @@ use kernel::miscdevice;
 use kernel::miscdevice::MiscDevice;
 use kernel::miscdevice::MiscDeviceRegistration;
 use kernel::new_condvar;
+use kernel::new_mutex;
 use kernel::new_spinlock;
 use kernel::prelude::*;
 use kernel::sync::Arc;
 use kernel::sync::CondVar;
+use kernel::sync::Mutex;
 use kernel::sync::SpinLock;
 use kernel::transmute::AsBytes;
 use kernel::types::ForeignOwnable;
@@ -52,7 +54,11 @@ const RKCHK_PID_LIST_NR: u32 = 4;
 /// Read all pid (ioctl command)
 const RKCHK_PID_LIST: u32 =
     _IOR::<[kernel::bindings::pid_t; 300]>(RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR);
-static mut EVENT_STACK: Option<Arc<EventStack>> = None;
+/// Read all the traced functions (ioctl sequence number)
+const RKCHK_TRACED_LIST_NR: u32 = 5;
+/// Read all pid (ioctl command)
+const RKCHK_TRACED_LIST: u32 =
+    _IOR::<[[u8; event::SIZE_STRING]; 20]>(RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR);
 
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
@@ -187,6 +193,11 @@ impl MiscDevice for Communication {
                 let nb = fill_pid_list(&mut writer)?;
                 Ok((core::mem::size_of::<kernel::bindings::pid_t>() * nb) as _)
             }
+            RKCHK_TRACED_LIST => {
+                let mut writer = user_slice.writer();
+                let nb = Probes::fill_traced_list(&mut writer)?;
+                Ok((core::mem::size_of::<[u8; event::SIZE_STRING]>() * nb) as _)
+            }
             RKCHK_INTEG_ALL => {
                 data.integrity_check.function_integ.check_functions()?;
 
@@ -240,14 +251,8 @@ impl kernel::Module for RootkitDetection {
 
         pr_info!("Registering the device\n");
 
-        unsafe { EVENT_STACK = Some(EventStack::init()?) };
+        let event_stack = EventStack::init()?;
 
-        let event_stack = unsafe {
-            match &*addr_of!(EVENT_STACK) {
-                None => return Err(ENOMEM),
-                Some(event) => event.clone(),
-            }
-        };
         // Setting up the probes
         let _probe = Probes::init(event_stack.clone())?;
 

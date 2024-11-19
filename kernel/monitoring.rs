@@ -716,6 +716,25 @@ macro_rules! probes {
                     GFP_KERNEL,
                 )
             }
+
+            /// Fill the user provided buffer with the list of the functions
+            pub fn fill_traced_list(buffer: &mut kernel::uaccess::UserSliceWriter) -> Result<usize> {
+                let mut nb = 0;
+                $(
+                let mut fct = [0_u8; event::SIZE_STRING];
+                for (i, c) in stringify!($func).as_bytes().iter().enumerate() {
+                    if let Some(e) = fct.get_mut(i) {
+                        *e = *c;
+                    }
+                    else {
+                        break;
+                    }
+                }
+                buffer.write::<[u8; event::SIZE_STRING]>(&fct)?;
+                nb +=1;
+                )*
+                Ok(nb)
+            }
         }
     };
 }
