@@ -24,12 +24,10 @@ use kernel::miscdevice;
 use kernel::miscdevice::MiscDevice;
 use kernel::miscdevice::MiscDeviceRegistration;
 use kernel::new_condvar;
-use kernel::new_mutex;
 use kernel::new_spinlock;
 use kernel::prelude::*;
 use kernel::sync::Arc;
 use kernel::sync::CondVar;
-use kernel::sync::Mutex;
 use kernel::sync::SpinLock;
 use kernel::transmute::AsBytes;
 use kernel::types::ForeignOwnable;
@@ -66,6 +64,7 @@ pub mod event;
 pub mod fx_hash;
 pub mod integrity;
 pub mod monitoring;
+pub mod response;
 
 use integrity::*;
 use monitoring::*;
@@ -250,6 +249,10 @@ impl kernel::Module for RootkitDetection {
         pr_info!("Rootkit detection written in Rust\n");
 
         pr_info!("Registering the device\n");
+
+        let _kernel_page = response::KernelTextPage::copy_center_page()?;
+
+        pr_info!("We successfully copied the kernel page!");
 
         let event_stack = EventStack::init()?;
 

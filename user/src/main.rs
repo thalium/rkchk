@@ -220,7 +220,6 @@ fn check_ftrace_hook(fd: i32 ) -> std::io::Result<Option<Vec<String>>> {
         }
     }
 
-    println!("We have the traced function by rkchk being: \n {:?}", rkchk_function_vec);
 
     let mut res = Vec::new();
 
@@ -297,14 +296,10 @@ impl Threat for Process {
 }
 
 fn run_integrity_check(fd: i32) {
-    println!("Running all the integrity checks");
     unsafe {
         rkchk_run_all_integ(fd).unwrap();
     }
 
-    
-
-    println!("Checking for traced functions");
     let traced_functions = check_ftrace_hook(fd).unwrap();
     if let Some(traced_function) = traced_functions {
         println!("Found traced functions:");
@@ -322,7 +317,7 @@ fn main() {
     let term = Arc::new(AtomicBool::new(false));    
 
     let term_thread = term.clone();
-    
+   
     println!("Checking for hidden process");
     let suspect_pid = check_hidden_process(fd).unwrap();
     if let Some(pid_list) = suspect_pid {
@@ -340,9 +335,11 @@ fn main() {
 
     let thread_handle = thread::spawn(move || {
         while !term_thread.load(std::sync::atomic::Ordering::Relaxed) { 
+            let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
             run_integrity_check(fd);
-            std::thread::sleep(Duration::new(5, 0));
+            std::thread::sleep(Duration::from_secs(5));
         }
+        nix::unistd::close(fd).unwrap();
     });
 
     while !term.load(std::sync::atomic::Ordering::Relaxed) {
