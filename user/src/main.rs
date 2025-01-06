@@ -20,6 +20,7 @@ const RKCHK_READ_EVENT_NR: u8 = 2;
 const RKCHK_NUMBER_TASK_NR: u32 = 3;
 const RKCHK_PID_LIST_NR: u32 = 4;
 const RKCHK_TRACED_LIST_NR: u32 = 5;
+const RKCHK_SWITCH_PAGE_NR: u32 = 6;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read_buf!(
     rkchk_read_event,
@@ -35,7 +36,7 @@ nix::ioctl_read!(
 );
 nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
 nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
-
+nix::ioctl_none!(rkchk_switch_page, RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
 
 
 impl Display for event::Events {

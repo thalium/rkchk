@@ -23,6 +23,7 @@ use kernel::list::ListLinks;
 use kernel::miscdevice;
 use kernel::miscdevice::MiscDevice;
 use kernel::miscdevice::MiscDeviceRegistration;
+use kernel::module::symbols_lookup_name;
 use kernel::new_condvar;
 use kernel::new_spinlock;
 use kernel::prelude::*;
@@ -57,6 +58,10 @@ const RKCHK_TRACED_LIST_NR: u32 = 5;
 /// Read all pid (ioctl command)
 const RKCHK_TRACED_LIST: u32 =
     _IOR::<[[u8; event::SIZE_STRING]; 20]>(RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR);
+/// Switch the kernel page to a saved one (ioctl sequence number)
+const RKCHK_SWITCH_PAGE_NR: u32 = 6;
+/// Switch the kernel page to a saved one
+const RKCHK_SWITCH_PAGE: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
 
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
@@ -68,6 +73,7 @@ pub mod response;
 
 use integrity::*;
 use monitoring::*;
+use response::Response;
 
 unsafe impl AsBytes for event::Events {}
 
@@ -158,6 +164,7 @@ impl EventStack {
 }
 
 struct Communication {
+    response: Arc<Response>,
     integrity_check: Arc<IntegrityCheck>,
     events: Arc<EventStack>,
 }
@@ -232,6 +239,11 @@ impl MiscDevice for Communication {
                 Ok(core::mem::size_of::<event::Events>() as _)
             }
 
+            RKCHK_SWITCH_PAGE => {
+                data.response.switch_page(0)?;
+
+                Ok(0)
+            }
             _ => Err(ENOTTY),
         }
     }
@@ -250,10 +262,6 @@ impl kernel::Module for RootkitDetection {
 
         pr_info!("Registering the device\n");
 
-        let _kernel_page = response::KernelTextPage::copy_center_page()?;
-
-        pr_info!("We successfully copied the kernel page!");
-
         let event_stack = EventStack::init()?;
 
         // Setting up the probes
@@ -261,11 +269,18 @@ impl kernel::Module for RootkitDetection {
 
         let _integrity_check = Arc::new(IntegrityCheck::init(event_stack.clone())?, GFP_KERNEL)?;
 
+        let response = Arc::pin_init(Response::new(), GFP_KERNEL)?;
+        let address: usize = symbols_lookup_name(c_str!("__x64_sys_delete_module")) as _;
+        response.add_copy(address)?;
+
+        pr_info!("We successfully copied the kernel page!");
+
         // Checks relative to the integrity (of text section, functions pointer, control registers...)
         // Initialize the integrity structure, saving th state of multiple elements
         unsafe {
             COMMUNICATION = Some(Arc::new(
                 Communication {
+                    response,
                     integrity_check: _integrity_check.clone(),
                     events: event_stack.clone(),
                 },
