@@ -21,6 +21,8 @@ const RKCHK_NUMBER_TASK_NR: u32 = 3;
 const RKCHK_PID_LIST_NR: u32 = 4;
 const RKCHK_TRACED_LIST_NR: u32 = 5;
 const RKCHK_SWITCH_PAGE_NR: u32 = 6;
+const RKCHK_LSMOD_NR: u32 = 7;
+const RKCHK_LS_INLINE_HOOK_NR: u32 = 8;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read_buf!(
     rkchk_read_event,
@@ -37,6 +39,8 @@ nix::ioctl_read!(
 nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
 nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
 nix::ioctl_none!(rkchk_switch_page, RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
+nix::ioctl_none!(rkchk_lsmod, RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
+nix::ioctl_none!(rkchk_ls_hook_inline, RKCHK_IOC_MAGIC, RKCHK_LS_INLINE_HOOK_NR);
 
 
 impl Display for event::Events {
@@ -307,6 +311,14 @@ fn run_integrity_check(fd: i32) {
         for fct in traced_function {
             println!("{fct}");
         }
+    }
+
+    unsafe {
+        rkchk_lsmod(fd).unwrap();
+    }
+
+    unsafe {
+        rkchk_ls_hook_inline(fd).unwrap();
     }
 }
 

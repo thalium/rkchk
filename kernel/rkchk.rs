@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-
 #![recursion_limit = "256"]
-
 //! Rust character device sample.
-use core::clone::Clone;
 use core::ptr::addr_of;
-use core::result::Result::Err;
-use core::result::Result::Ok;
 use core::str;
 use event::Events;
 use kernel::c_str;
@@ -23,7 +18,9 @@ use kernel::list::ListLinks;
 use kernel::miscdevice;
 use kernel::miscdevice::MiscDevice;
 use kernel::miscdevice::MiscDeviceRegistration;
+use kernel::module::symbols_lookup_address;
 use kernel::module::symbols_lookup_name;
+use kernel::module::ModuleIter;
 use kernel::new_condvar;
 use kernel::new_spinlock;
 use kernel::prelude::*;
@@ -62,6 +59,14 @@ const RKCHK_TRACED_LIST: u32 =
 const RKCHK_SWITCH_PAGE_NR: u32 = 6;
 /// Switch the kernel page to a saved one
 const RKCHK_SWITCH_PAGE: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
+/// Print all the module in the linked list (ioctl sequence number)
+const RKCHK_LSMOD_NR: u32 = 7;
+/// Print all the module in the linked list
+const RKCHK_LSMOD: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
+/// Print all the inline hook detected (ioctl sequence number)
+const RKCHK_LS_INLINE_HOOK_NR: u32 = 8;
+/// Print all the inline hook detected
+const RKCHK_LS_INLINE_HOOK: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_LS_INLINE_HOOK_NR);
 
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
@@ -244,6 +249,32 @@ impl MiscDevice for Communication {
 
                 Ok(0)
             }
+
+            RKCHK_LSMOD => {
+                let module_iter = ModuleIter::new();
+
+                for m in module_iter {
+                    let mut offset = 0;
+                    let mut symbolsize = 0;
+                    let (modname, _) =
+                        symbols_lookup_address(m.as_ptr() as _, &mut offset, &mut symbolsize)?;
+                    if let Some(modname) = modname {
+                        let name = CStr::from_bytes_with_nul(&modname)?;
+                        pr_info!("Found also the module : {:?}\n", name);
+                    } else {
+                        pr_info!("Suspiciously hidden module !\n");
+                    }
+                }
+
+                Ok(0)
+            }
+
+            RKCHK_LS_INLINE_HOOK => {
+                data.response.compare_page(0)?;
+
+                Ok(0)
+            }
+
             _ => Err(ENOTTY),
         }
     }

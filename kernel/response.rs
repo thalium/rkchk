@@ -4,16 +4,18 @@
 
 use core::ffi::c_void;
 
+use kernel::fmt;
 use kernel::{
     alloc::{KVec, Vec},
     bindings,
     error::Error,
     init::PinInit,
+    module::symbols_lookup_address,
     new_mutex, page,
     pgtable::{self, lookup_address, Pgtable},
-    pin_init, pr_alert,
-    prelude::pin_data,
-    prelude::{EINVAL, GFP_KERNEL},
+    pin_init, pr_alert, pr_info,
+    prelude::{pin_data, EINVAL, GFP_KERNEL},
+    str::{CStr, CString},
     sync::{
         lock::{mutex::MutexBackend, Guard},
         Mutex,
@@ -93,6 +95,52 @@ impl KernelTextPage {
             is_switched: false,
         })
     }
+
+    fn compare_page(&self) -> Result {
+        let pgtable = pgtable::lookup_address(self.begin_addr)?;
+        let order = pgtable.order();
+        let n_pages = (2usize).pow(order);
+        let n_bytes = page::PAGE_SIZE * n_pages;
+
+        let diffs = unsafe {
+            self._page
+                .compare_raw_multiple(self.begin_addr as *const u8, 0, n_bytes)
+        }?;
+
+        pr_info!(
+            "We found {} difference, listing the corresponding symbols\n",
+            diffs.len()
+        );
+
+        if diffs.is_empty() {
+            pr_info!("Found no hook\n");
+        }
+
+        for diff in diffs {
+            let mut offset = 0;
+            let mut symbolsize = 0;
+            let (modname, symbolname) =
+                symbols_lookup_address(diff as u64, &mut offset, &mut symbolsize)?;
+
+            let symbolname = match symbolname {
+                None => CString::try_from_fmt(fmt!("{:x}", diff as usize))?,
+                Some(vec) => CString::try_from_fmt(fmt!("{}", CStr::from_bytes_with_nul(&vec)?))?,
+            };
+            let modname = match modname {
+                None => CString::try_from_fmt(fmt!("kernel"))?,
+                Some(vec) => CString::try_from_fmt(fmt!("{}", CStr::from_bytes_with_nul(&vec)?))?,
+            };
+
+            pr_info!(
+                "Found a hook at {} + {:x} [{}]\n",
+                symbolname.to_str()?,
+                offset,
+                modname.to_str()?
+            );
+        }
+        Ok(())
+    }
+
     /// Switch between the saved page and the real page of the saved page in the page table
     fn switch(&mut self) -> Result<()> {
         // We transition from the original page to the copied page
@@ -186,6 +234,18 @@ impl Response {
         };
 
         page.switch()
+    }
+
+    /// Compare the differents pages
+    pub fn compare_page(&self, id: usize) -> Result {
+        let mut lock = self.kernel_text.lock();
+
+        let page = match lock.get_mut(id) {
+            Some(e) => e,
+            None => return Err(EINVAL),
+        };
+
+        page.compare_page()
     }
 }
 
