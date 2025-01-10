@@ -2,9 +2,8 @@
 
 //! The response part of rkchk
 
-use core::ffi::c_void;
+use core::{ffi::c_void, ops::Range, slice};
 
-use kernel::fmt;
 use kernel::{
     alloc::{KVec, Vec},
     bindings,
@@ -21,6 +20,7 @@ use kernel::{
         Mutex,
     },
 };
+use kernel::{fmt, insn};
 
 use kernel::error::Result;
 /// Represent a copy of a kernel text page
@@ -116,7 +116,12 @@ impl KernelTextPage {
             pr_info!("Found no hook\n");
         }
 
+        let mut last_range: Range<usize> = 0..0;
+
         for diff in diffs {
+            if last_range.contains(&(diff as usize)) {
+                continue;
+            }
             let mut offset = 0;
             let mut symbolsize = 0;
             let (modname, symbolname) =
@@ -131,11 +136,21 @@ impl KernelTextPage {
                 Some(vec) => CString::try_from_fmt(fmt!("{}", CStr::from_bytes_with_nul(&vec)?))?,
             };
 
+            // SAFETY : This is a pointer to kernel text so it's valid for 15 byte I hope
+            let buf = unsafe { slice::from_raw_parts(diff, 15) };
+
+            let mut insn = insn::Insn::new(buf);
+
+            let length = insn.get_length()?;
+
+            last_range = (diff as usize)..((diff as usize) + (length as usize));
+
             pr_info!(
-                "Found a hook at {} + {:x} [{}]\n",
+                "Found a hook at {} + {:x} [{}] : opcode {:x}\n",
                 symbolname.to_str()?,
                 offset,
-                modname.to_str()?
+                modname.to_str()?,
+                insn.get_opcode()?,
             );
         }
         Ok(())
