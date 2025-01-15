@@ -6,6 +6,47 @@ pub const SIZE_STRING: usize = 100;
 /// Maximum size of the module name string
 pub const MODULE_NAME_SIZE: usize = 56;
 
+pub mod ioctl {
+    /// RKCHK ioctl type (aka magic number)
+    pub const RKCHK_IOC_MAGIC: u32 = b'j' as u32;
+    /// Run all the integrity checks (ioctl sequence number)
+    pub const RKCHK_INTEG_ALL_NR: u32 = 1;
+    /// Read new events (ioctl sequence number)
+    pub const RKCHK_READ_EVENT_NR: u32 = 2;
+    /// Read number task_struct (ioctl sequence number)
+    pub const RKCHK_NUMBER_TASK_NR: u32 = 3;
+    /// Read all pid (ioctl sequence number)
+    pub const RKCHK_PID_LIST_NR: u32 = 4;
+    /// Read all the traced functions (ioctl sequence number)
+    pub const RKCHK_TRACED_LIST_NR: u32 = 5;
+    /// Switch the kernel page to a saved one (ioctl sequence number)
+    pub const RKCHK_SWITCH_PAGE_NR: u32 = 6;
+    /// Print all the module in the linked list (ioctl sequence number)
+    pub const RKCHK_LSMOD_NR: u32 = 7;
+    /// Print all the inline hook detected (ioctl sequence number)
+    pub const RKCHK_GET_INLINE_HOOK_NR: u32 = 8;
+    /// Get a stack trace information
+    pub const RKCHK_GET_STACKTRACE_NR: u32 = 9;
+
+    use crate::event::{MODULE_NAME_SIZE, SIZE_STRING};
+
+    #[repr(C)]
+    pub struct LKM {
+        pub name: [u8; MODULE_NAME_SIZE],
+    }
+
+    #[repr(C)]
+    pub struct StackEntry {
+        pub name: Option<[u8; SIZE_STRING]>,
+        pub modname: Option<[u8; MODULE_NAME_SIZE]>,
+        pub addr: u64,
+        pub offset: u64,
+    }
+
+    #[repr(C)]
+    pub struct InlineHook {}
+}
+
 /// Info of a loaded Kernel Module
 #[repr(C)]
 pub struct LoadedLKMInfo {

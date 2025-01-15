@@ -9,6 +9,7 @@ use kernel::error::Result;
 use kernel::impl_has_list_links;
 use kernel::impl_list_item;
 use kernel::ioctl::_IO;
+use kernel::ioctl::_IOC_NR;
 use kernel::ioctl::_IOC_SIZE;
 use kernel::ioctl::_IOR;
 use kernel::list::impl_list_arc_safe;
@@ -31,54 +32,41 @@ use kernel::transmute::AsBytes;
 use kernel::types::ForeignOwnable;
 use kernel::uaccess::UserSlice;
 
-/// RKCHK ioctl type (aka magic number)
-const RKCHK_IOC_MAGIC: u32 = b'j' as u32;
-/// Run all the integrity checks (ioctl sequence number)
-const RKCHK_INTEG_ALL_NR: u32 = 1;
+pub mod event;
+
+use event::ioctl::*;
+/*
 /// Run all the integrity checks (ioctl command)
 const RKCHK_INTEG_ALL: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
-/// Read new events (ioctl sequence number)
-const RKCHK_READ_EVENT_NR: u32 = 2;
 /// Read new events (ioctl command)
 const RKCHK_READ_EVENT: u32 = _IOR::<event::Events>(RKCHK_IOC_MAGIC, RKCHK_READ_EVENT_NR);
-/// Read number task_struct (ioctl sequence number)
-const RKCHK_NUMBER_TASK_NR: u32 = 3;
 /// Read number task_stuct (ioctl command)
 const RKCHK_NUMBER_TASK: u32 = _IOR::<usize>(RKCHK_IOC_MAGIC, RKCHK_NUMBER_TASK_NR);
-/// Read all pid (ioctl sequence number)
-const RKCHK_PID_LIST_NR: u32 = 4;
 /// Read all pid (ioctl command)
 const RKCHK_PID_LIST: u32 =
     _IOR::<[kernel::bindings::pid_t; 300]>(RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR);
-/// Read all the traced functions (ioctl sequence number)
-const RKCHK_TRACED_LIST_NR: u32 = 5;
 /// Read all pid (ioctl command)
 const RKCHK_TRACED_LIST: u32 =
     _IOR::<[[u8; event::SIZE_STRING]; 20]>(RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR);
-/// Switch the kernel page to a saved one (ioctl sequence number)
-const RKCHK_SWITCH_PAGE_NR: u32 = 6;
 /// Switch the kernel page to a saved one
 const RKCHK_SWITCH_PAGE: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
-/// Print all the module in the linked list (ioctl sequence number)
-const RKCHK_LSMOD_NR: u32 = 7;
 /// Print all the module in the linked list
-const RKCHK_LSMOD: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
-/// Print all the inline hook detected (ioctl sequence number)
-const RKCHK_LS_INLINE_HOOK_NR: u32 = 8;
+const RKCHK_LSMOD_REFRESH: u32 = _IOR::<usize>(RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
 /// Print all the inline hook detected
 const RKCHK_LS_INLINE_HOOK: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_LS_INLINE_HOOK_NR);
-
+*/
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
-pub mod event;
 pub mod fx_hash;
 pub mod integrity;
 pub mod monitoring;
 pub mod response;
+pub mod stacktrace;
 
 use integrity::*;
 use monitoring::*;
 use response::Response;
+use stacktrace::*;
 
 unsafe impl AsBytes for event::Events {}
 
@@ -120,7 +108,9 @@ impl_has_list_links!(impl HasListLinks for KEvents { self.list_link });
 impl_list_item!(impl ListItem<0> for KEvents { using ListLinks; });
 impl_list_arc_safe!(impl ListArcSafe<0> for KEvents { untracked; });
 
-/// The linked list on event
+/// The linked list on event and stacktrace
+/// And in a more general manner stack that contain all data that need to be stored before being
+/// fetched by the userspace programms
 #[pin_data]
 pub struct EventStack {
     x: u32,
@@ -128,6 +118,8 @@ pub struct EventStack {
     wait_queue: CondVar,
     #[pin]
     event_stack: SpinLock<List<KEvents, 0>>,
+    #[pin]
+    stacktrace_stack: SpinLock<List<StacktraceInfo, 0>>,
 }
 
 impl EventStack {
@@ -137,6 +129,7 @@ impl EventStack {
                 x : 0,
                 wait_queue <- new_condvar!("data queue"),
                 event_stack <- new_spinlock!(List::new(), "event stack"),
+                stacktrace_stack <- new_spinlock!(List::new(), "stacktrace stack")
             }),
             GFP_KERNEL,
         )
@@ -166,12 +159,20 @@ impl EventStack {
             None => Err(EAGAIN),
         }
     }
-}
 
+    pub fn push_stacktrace(&self, stacktrace: ListArc<StacktraceInfo, 0>) {
+        self.stacktrace_stack.lock().push_front(stacktrace);
+    }
+
+    pub fn pop_stacktrace(&self) -> Option<ListArc<StacktraceInfo, 0>> {
+        self.stacktrace_stack.lock().pop_back()
+    }
+}
 struct Communication {
     response: Arc<Response>,
     integrity_check: Arc<IntegrityCheck>,
     events: Arc<EventStack>,
+    stacktrace_stack: Arc<SpinLock<List<StacktraceInfo, 0>>>,
 }
 
 #[vtable]
@@ -194,22 +195,22 @@ impl MiscDevice for Communication {
     ) -> Result<isize> {
         let size = _IOC_SIZE(cmd);
         let user_slice = UserSlice::new(arg, size);
-        match cmd {
-            RKCHK_NUMBER_TASK => {
+        match _IOC_NR(cmd) {
+            RKCHK_NUMBER_TASK_NR => {
                 user_slice.writer().write(&number_tasks())?;
                 Ok(core::mem::size_of::<usize>() as _)
             }
-            RKCHK_PID_LIST => {
+            RKCHK_PID_LIST_NR => {
                 let mut writer = user_slice.writer();
                 let nb = fill_pid_list(&mut writer)?;
                 Ok((core::mem::size_of::<kernel::bindings::pid_t>() * nb) as _)
             }
-            RKCHK_TRACED_LIST => {
+            RKCHK_TRACED_LIST_NR => {
                 let mut writer = user_slice.writer();
                 let nb = Probes::fill_traced_list(&mut writer)?;
                 Ok((core::mem::size_of::<[u8; event::SIZE_STRING]>() * nb) as _)
             }
-            RKCHK_INTEG_ALL => {
+            RKCHK_INTEG_ALL_NR => {
                 data.integrity_check.function_integ.check_functions()?;
 
                 data.integrity_check
@@ -223,7 +224,7 @@ impl MiscDevice for Communication {
 
                 Ok(0)
             }
-            RKCHK_READ_EVENT => {
+            RKCHK_READ_EVENT_NR => {
                 let mut writer = user_slice.writer();
                 let event = data.events.wait_events()?;
 
@@ -244,13 +245,13 @@ impl MiscDevice for Communication {
                 Ok(core::mem::size_of::<event::Events>() as _)
             }
 
-            RKCHK_SWITCH_PAGE => {
+            RKCHK_SWITCH_PAGE_NR => {
                 data.response.switch_page(0)?;
 
                 Ok(0)
             }
 
-            RKCHK_LSMOD => {
+            RKCHK_LSMOD_NR => {
                 let module_iter = ModuleIter::new();
 
                 for m in module_iter {
@@ -269,10 +270,20 @@ impl MiscDevice for Communication {
                 Ok(0)
             }
 
-            RKCHK_LS_INLINE_HOOK => {
+            RKCHK_GET_INLINE_HOOK_NR => {
                 data.response.compare_page(0)?;
 
                 Ok(0)
+            }
+
+            RKCHK_GET_STACKTRACE_NR => {
+                let mut writer = user_slice.writer();
+
+                if let Some(stackinfo) = data.events.pop_stacktrace() {
+                    stackinfo.write_to_user(&mut writer)
+                } else {
+                    Ok(0)
+                }
             }
 
             _ => Err(ENOTTY),
@@ -295,6 +306,9 @@ impl kernel::Module for RootkitDetection {
 
         let event_stack = EventStack::init()?;
 
+        let stacktrace_stack =
+            Arc::pin_init(new_spinlock!(List::new(), "event stack"), GFP_KERNEL)?;
+
         // Setting up the probes
         let _probe = Probes::init(event_stack.clone())?;
 
@@ -314,6 +328,7 @@ impl kernel::Module for RootkitDetection {
                     response,
                     integrity_check: _integrity_check.clone(),
                     events: event_stack.clone(),
+                    stacktrace_stack,
                 },
                 GFP_KERNEL,
             )?)

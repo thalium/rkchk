@@ -1,4 +1,4 @@
-use nix;
+use nix::{self, Result};
 use nix::errno::Errno;
 use nix::fcntl;
 use nix::libc::{pid_t, sleep};
@@ -9,20 +9,12 @@ use nix::unistd::Pid;
 use std::borrow::Borrow;
 use std::ffi::{CStr, CString};
 use std::fmt::{write, Display};
+use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::{fs, thread};
 use std::str::FromStr;
 use std::sync::Arc;
-const RKCHK_IOC_MAGIC: u8 = b'j';
-const RKCHK_INTEG_ALL_NR: u8 = 1;
-const RKCHK_READ_EVENT_NR: u8 = 2;
-const RKCHK_NUMBER_TASK_NR: u32 = 3;
-const RKCHK_PID_LIST_NR: u32 = 4;
-const RKCHK_TRACED_LIST_NR: u32 = 5;
-const RKCHK_SWITCH_PAGE_NR: u32 = 6;
-const RKCHK_LSMOD_NR: u32 = 7;
-const RKCHK_LS_INLINE_HOOK_NR: u32 = 8;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read_buf!(
     rkchk_read_event,
@@ -159,6 +151,31 @@ impl Display for event::EBPFFuncType {
             Self::SendSignal => write!(f, "bpf_send_signal"),
         }
     }
+}
+
+fn read_data<T>(trigger : impl FnOnce(&mut MaybeUninit<usize>) -> Result<usize>, next : impl Fn(&mut MaybeUninit<T>) -> Result<usize>) -> Result<Vec<T>> {
+    let mut n = MaybeUninit::uninit();
+
+    trigger(&mut n)?;
+
+    let n = unsafe {
+        n.assume_init()
+    };
+
+    let mut res = Vec::with_capacity(n);
+
+    let buf  = res.spare_capacity_mut();
+    for i in 0..n {
+        let tmp = buf.get_mut(i).unwrap(); // By the with_capacity guaranty we have enought element in buf
+        
+        next(tmp)?;
+    }
+
+    unsafe {
+        res.set_len(n);
+    }
+
+    Ok(res)
 }
 
 fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
@@ -312,7 +329,36 @@ fn run_integrity_check(fd: i32) {
             println!("{fct}");
         }
     }
+/*
 
+    let mod_vec = read_data::<event::ioctl::LKM>(| n | {
+        unsafe { rkchk_refresh_mod(fd, n.as_mut_ptr())}
+    },
+    | tmp | {
+        unsafe { rkchk_next_mod(fd, tmp.as_mut_ptr())}
+    }).unwrap();
+
+    if !mod_vec.is_empty() {
+        println!("List of loaded module :");
+    }
+    for module in mod_vec {
+        println!("[{}]", module);
+    }
+
+    let hook_vec = read_data::<event::ioctl::InlineHook>(| n | {
+        unsafe {rkchk_ls_hook_inline(fd, n.as_mut_ptr())}
+    }, 
+    | tmp | {
+        unsafe {rkchk_next_hook(fd, tmp.as_mut_ptr())}
+    }).unwrap();
+
+    if !hook_vec.is_empty() {
+        println!("Inline hook discovered :");
+    }
+    for hook in hook_vec {
+        println!("  {}", hook);
+    }
+*/
     unsafe {
         rkchk_lsmod(fd).unwrap();
     }
@@ -324,6 +370,9 @@ fn run_integrity_check(fd: i32) {
 
 
 pub mod event;
+
+use event::ioctl::*;
+
 fn main() {
     let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
 
