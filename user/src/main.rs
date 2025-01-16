@@ -12,11 +12,11 @@ use std::fmt::{write, Display};
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs, str, thread};
 use std::str::FromStr;
 use std::sync::Arc;
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
-nix::ioctl_read_buf!(
+nix::ioctl_read!(
     rkchk_read_event,
     RKCHK_IOC_MAGIC,
     RKCHK_READ_EVENT_NR,
@@ -32,7 +32,8 @@ nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
 nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
 nix::ioctl_none!(rkchk_switch_page, RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
 nix::ioctl_none!(rkchk_lsmod, RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
-nix::ioctl_none!(rkchk_ls_hook_inline, RKCHK_IOC_MAGIC, RKCHK_LS_INLINE_HOOK_NR);
+nix::ioctl_none!(rkchk_ls_hook_inline, RKCHK_IOC_MAGIC, RKCHK_GET_INLINE_HOOK_NR);
+nix::ioctl_read_buf!(rkchk_get_stacktrace, RKCHK_IOC_MAGIC, RKCHK_GET_STACKTRACE_NR, StackEntry);
 
 
 impl Display for event::Events {
@@ -152,6 +153,30 @@ impl Display for event::EBPFFuncType {
         }
     }
 }
+
+impl Display for StackEntry{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:x}", self.addr)?;
+        if let Some(symbol) = &self.name {
+            if let Ok(symbol) = CStr::from_bytes_until_nul(symbol) {
+                write!(f, " : {:?} + {:x}",symbol, self.offset)?;
+            }
+            else {
+                write!(f, " : {:?}", symbol)?;
+            }
+        }
+        if let Some(module) = &self.modname {
+            if let Ok(module) = CStr::from_bytes_until_nul(module) {
+                write!(f, " [{:?}]", module)?;
+            }
+            else {
+                write!(f, " [{:?}]", module)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 
 fn read_data<T>(trigger : impl FnOnce(&mut MaybeUninit<usize>) -> Result<usize>, next : impl Fn(&mut MaybeUninit<T>) -> Result<usize>) -> Result<Vec<T>> {
     let mut n = MaybeUninit::uninit();
@@ -329,36 +354,7 @@ fn run_integrity_check(fd: i32) {
             println!("{fct}");
         }
     }
-/*
 
-    let mod_vec = read_data::<event::ioctl::LKM>(| n | {
-        unsafe { rkchk_refresh_mod(fd, n.as_mut_ptr())}
-    },
-    | tmp | {
-        unsafe { rkchk_next_mod(fd, tmp.as_mut_ptr())}
-    }).unwrap();
-
-    if !mod_vec.is_empty() {
-        println!("List of loaded module :");
-    }
-    for module in mod_vec {
-        println!("[{}]", module);
-    }
-
-    let hook_vec = read_data::<event::ioctl::InlineHook>(| n | {
-        unsafe {rkchk_ls_hook_inline(fd, n.as_mut_ptr())}
-    }, 
-    | tmp | {
-        unsafe {rkchk_next_hook(fd, tmp.as_mut_ptr())}
-    }).unwrap();
-
-    if !hook_vec.is_empty() {
-        println!("Inline hook discovered :");
-    }
-    for hook in hook_vec {
-        println!("  {}", hook);
-    }
-*/
     unsafe {
         rkchk_lsmod(fd).unwrap();
     }
@@ -372,6 +368,24 @@ fn run_integrity_check(fd: i32) {
 pub mod event;
 
 use event::ioctl::*;
+
+fn get_print_stacktrace(fd : i32, n : usize) {
+    let mut vec = Vec::new();
+    vec.resize(n, StackEntry::default());
+
+
+    if let Err(err) = unsafe { rkchk_get_stacktrace(fd, &mut vec) } {
+        println!("Error getting stacktrace : {}", err);
+    }
+
+    if !vec.is_empty() {
+        println!("[DUMP STACK]");
+    }
+    for entry in vec {
+        println!("  {}", entry);
+    }
+}
+
 
 fn main() {
     let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
@@ -405,12 +419,13 @@ fn main() {
     });
 
     while !term.load(std::sync::atomic::Ordering::Relaxed) {
-        let mut event = [event::Events::NoEvent];
-        unsafe { rkchk_read_event(fd, &mut event).unwrap() };
+        let mut event = event::Events::NoEvent;
+        unsafe { rkchk_read_event(fd, &mut event as _).unwrap() };
         
         match event {
-            [event::Events::StdioToSocket(_)] => (),
-            _ => println!("{}", event.get(0).unwrap()),
+            event::Events::StdioToSocket(_) => (),
+            event::Events::Stacktrace(n) => get_print_stacktrace(fd, n),
+            _ => println!("{}", event),
 
         };
     }

@@ -6,6 +6,7 @@ pub const SIZE_STRING: usize = 100;
 /// Maximum size of the module name string
 pub const MODULE_NAME_SIZE: usize = 56;
 
+/// Module of the different defined ioctl number and their associated structure
 pub mod ioctl {
     /// RKCHK ioctl type (aka magic number)
     pub const RKCHK_IOC_MAGIC: u32 = b'j' as u32;
@@ -30,19 +31,28 @@ pub mod ioctl {
 
     use crate::event::{MODULE_NAME_SIZE, SIZE_STRING};
 
+    /// Represent a loaded LKM
     #[repr(C)]
     pub struct LKM {
+        /// Name of the LKM
         pub name: [u8; MODULE_NAME_SIZE],
     }
 
+    /// Represent a entry in the stacktrace with all the information gathered
     #[repr(C)]
+    #[derive(Default, Clone)]
     pub struct StackEntry {
+        /// Symbol
         pub name: Option<[u8; SIZE_STRING]>,
+        /// Name of the module, `kernel` otherwise
         pub modname: Option<[u8; MODULE_NAME_SIZE]>,
+        /// Addr on the stack
         pub addr: u64,
+        /// Offset of the address respectivly to the stack
         pub offset: u64,
     }
 
+    /// Represent a detected inline hook in the kernel's text and the information gathered on it
     #[repr(C)]
     pub struct InlineHook {}
 }
@@ -168,4 +178,6 @@ pub enum Events {
     HiddenFile(HiddenFileInfo),
     /// A suspicious envirronement variable was found
     EnvPreload(EnvInfo),
+    /// An available Stacktrace, contain the number of entry of type `StackEntry`
+    Stacktrace(usize),
 }

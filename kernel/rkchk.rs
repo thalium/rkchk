@@ -3,15 +3,13 @@
 //! Rust character device sample.
 use core::ptr::addr_of;
 use core::str;
+use event::ioctl;
 use event::Events;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::impl_has_list_links;
 use kernel::impl_list_item;
-use kernel::ioctl::_IO;
-use kernel::ioctl::_IOC_NR;
-use kernel::ioctl::_IOC_SIZE;
-use kernel::ioctl::_IOR;
+use kernel::ioctl::{_IOC_NR, _IOC_SIZE};
 use kernel::list::impl_list_arc_safe;
 use kernel::list::List;
 use kernel::list::ListArc;
@@ -69,6 +67,7 @@ use response::Response;
 use stacktrace::*;
 
 unsafe impl AsBytes for event::Events {}
+unsafe impl AsBytes for ioctl::StackEntry {}
 
 module! {
     type: RootkitDetection,
@@ -160,10 +159,12 @@ impl EventStack {
         }
     }
 
+    /// Push a collected stacktrace on the linked list of availabale stacktrace
     pub fn push_stacktrace(&self, stacktrace: ListArc<StacktraceInfo, 0>) {
         self.stacktrace_stack.lock().push_front(stacktrace);
     }
 
+    /// Return a stacktrace from the linked list of stacktrace (FIFO order)
     pub fn pop_stacktrace(&self) -> Option<ListArc<StacktraceInfo, 0>> {
         self.stacktrace_stack.lock().pop_back()
     }
@@ -172,7 +173,6 @@ struct Communication {
     response: Arc<Response>,
     integrity_check: Arc<IntegrityCheck>,
     events: Arc<EventStack>,
-    stacktrace_stack: Arc<SpinLock<List<StacktraceInfo, 0>>>,
 }
 
 #[vtable]
@@ -306,9 +306,6 @@ impl kernel::Module for RootkitDetection {
 
         let event_stack = EventStack::init()?;
 
-        let stacktrace_stack =
-            Arc::pin_init(new_spinlock!(List::new(), "event stack"), GFP_KERNEL)?;
-
         // Setting up the probes
         let _probe = Probes::init(event_stack.clone())?;
 
@@ -328,7 +325,6 @@ impl kernel::Module for RootkitDetection {
                     response,
                     integrity_check: _integrity_check.clone(),
                     events: event_stack.clone(),
-                    stacktrace_stack,
                 },
                 GFP_KERNEL,
             )?)

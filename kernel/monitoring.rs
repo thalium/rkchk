@@ -3,11 +3,9 @@
 //! Rust character device sample.
 use core::clone::Clone;
 use core::ffi::c_char;
-use core::fmt::Display;
 use core::hash::Hash;
 use core::hash::Hasher;
 use core::iter::Iterator;
-use core::ops::Deref;
 use core::result::Result::Err;
 use core::result::Result::Ok;
 use core::slice;
@@ -16,25 +14,16 @@ use event::EBPFFuncInfo;
 use event::LoadedLKMInfo;
 use event::ModuleInfo;
 use event::ProcessInfo;
-use kernel::alloc::allocator::Kmalloc;
-use kernel::alloc::IntoIter;
 use kernel::bindings;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::fprobe::FprobeOperations;
-use kernel::impl_has_list_links;
-use kernel::impl_list_arc_safe;
-use kernel::impl_list_item;
 use kernel::list::ListArc;
-use kernel::list::ListLinks;
 use kernel::module::is_kernel;
 use kernel::module::is_module;
-use kernel::module::symbols_lookup_address;
 use kernel::prelude::*;
 use kernel::socket;
-use kernel::stacktrace::Stacktrace;
 use kernel::str::CStr;
-use kernel::str::CString;
 use kernel::sync::Arc;
 use kernel::sync::ArcBorrow;
 use kernel::task::Task;
@@ -48,11 +37,9 @@ use kernel::workqueue;
 
 use crate::event;
 use crate::event::EnvType;
-use crate::event::SIZE_STRING;
 use crate::fx_hash;
 use crate::EventStack;
 use crate::KEvents;
-use crate::StackEntry;
 use crate::StacktraceWork;
 
 /// `kallsyms_lookup_name` symbol black list
@@ -247,7 +234,9 @@ impl fprobe::FprobeOperations for KallsymsLookupNameProbe {
         for fct in NAME_LOOKUP.iter() {
             if (*fct).as_bytes() == str.as_bytes() {
                 if let Ok(stacktrace) = StacktraceWork::new(30, GFP_ATOMIC, data.into()) {
-                    workqueue::system().enqueue(stacktrace);
+                    if let Err(_) = workqueue::system().enqueue(stacktrace) {
+                        pr_info!("Failed to enqueue the stacktrace\n");
+                    }
                 }
                 break;
             }

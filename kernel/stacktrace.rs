@@ -1,18 +1,29 @@
+//! Stacktrace information gathering and management crate
+use core::{fmt::Display, ops::Deref};
+
 use kernel::{
-    alloc::Flags,
+    alloc::{Flags, KVec},
     error::Result,
-    impl_has_work,
+    fmt, impl_has_list_links, impl_has_work, impl_list_arc_safe, impl_list_item,
     init::InPlaceInit,
-    list::List,
+    list::{ListArc, ListLinks},
     macros::pin_data,
+    module::symbols_lookup_address,
     new_work, pin_init,
-    stacktrace::{self, Stacktrace},
-    sync::{Arc, SpinLock},
+    prelude::GFP_KERNEL,
+    stacktrace::Stacktrace,
+    str::{CStr, CString},
+    sync::Arc,
+    try_pin_init,
     uaccess::UserSliceWriter,
-    workqueue::WorkItem,
+    workqueue::{Work, WorkItem},
 };
 
-use crate::EventStack;
+use crate::{event::SIZE_STRING, EventStack, StackEntry};
+use crate::{
+    event::{Events, MODULE_NAME_SIZE},
+    KEvents,
+};
 
 /// Gather the information from a generated stacktrace
 
@@ -33,7 +44,10 @@ impl WorkItem for StacktraceWork {
 
     fn run(this: Self::Pointer) {
         if let Ok(stackinfo) = StacktraceInfo::new(&this.stacktrace) {
-            this.event_stack.push_stacktrace(stackinfo);
+            if let Ok(kevent) = KEvents::new(Events::Stacktrace(stackinfo.vec.len())) {
+                this.event_stack.push_stacktrace(stackinfo);
+                this.event_stack.push_event(kevent);
+            }
         }
     }
 }
@@ -76,16 +90,17 @@ impl Display for StacktraceInfoEntry {
 }
 
 impl StackEntry {
-    pub fn from_stackinfo(entry: &StacktraceInfoEntry) -> StackEntry {
+    fn from_stackinfo(entry: &StacktraceInfoEntry) -> StackEntry {
         StackEntry {
             addr: entry.addr,
             offset: entry.offset,
-            name: if let Some(symbol) = entry.symbol {
-                let name = [0; SIZE_STRING];
+            name: if let Some(symbol) = &entry.symbol {
+                let mut name = [0; SIZE_STRING];
                 for (i, e) in symbol.as_bytes().iter().enumerate() {
                     if let Some(c) = name.get_mut(i) {
-                        *c = e;
+                        *c = *e;
                     } else {
+                        unsafe { *name.get_unchecked_mut(SIZE_STRING - 1) = 0 };
                         break;
                     }
                 }
@@ -93,12 +108,13 @@ impl StackEntry {
             } else {
                 None
             },
-            modname: if let Some(module) = entry.module {
-                let modname = [0; SIZE_STRING];
+            modname: if let Some(module) = &entry.module {
+                let mut modname = [0; MODULE_NAME_SIZE];
                 for (i, e) in module.as_bytes().iter().enumerate() {
                     if let Some(c) = modname.get_mut(i) {
-                        *c = e;
+                        *c = *e;
                     } else {
+                        unsafe { *modname.get_unchecked_mut(MODULE_NAME_SIZE - 1) = 0 }
                         break;
                     }
                 }
@@ -111,6 +127,7 @@ impl StackEntry {
 }
 
 /// Information of the stack trace
+#[pin_data]
 pub struct StacktraceInfo {
     vec: KVec<StacktraceInfoEntry>,
     #[pin]
@@ -122,10 +139,10 @@ impl StacktraceInfo {
     pub fn new(stack: &Stacktrace) -> Result<ListArc<Self>> {
         let mut vec = KVec::new();
 
-        for addr in stack.into_iter() {
+        for addr in stack.iter() {
             let mut offset = 0;
             let mut symbolsize = 0;
-            let (modname, symbol) = symbols_lookup_address(addr, &mut offset, &mut symbolsize)?;
+            let (modname, symbol) = symbols_lookup_address(*addr, &mut offset, &mut symbolsize)?;
 
             let modname = match modname {
                 Some(modname) => Some(CString::try_from_fmt(fmt!(
@@ -145,7 +162,7 @@ impl StacktraceInfo {
 
             vec.push(
                 StacktraceInfoEntry {
-                    addr,
+                    addr: *addr,
                     offset,
                     symbol,
                     module: modname,
@@ -163,23 +180,15 @@ impl StacktraceInfo {
         )
     }
 
+    /// Write to the user the `StacktraceInfo` converting it to a shared, serializable `StackEntry` type
     pub fn write_to_user(&self, writer: &mut UserSliceWriter) -> Result<isize> {
         for entry in &self.vec {
             writer.write(&StackEntry::from_stackinfo(entry))?;
         }
-        Ok((core::mem::size_of::<StackEntry>() * stacktrace.vec.len()) as isize)
+        Ok((core::mem::size_of::<StackEntry>() * self.vec.len()) as isize)
     }
 }
 
-impl IntoIterator for StacktraceInfo {
-    type Item = StacktraceInfoEntry;
-    type IntoIter = IntoIter<StacktraceInfoEntry, Kmalloc>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl_has_list_links!(impl HasListLinks for StasktraceInfo {self.list_link});
+impl_has_list_links!(impl HasListLinks for StacktraceInfo {self.list_link});
 impl_list_item!(impl ListItem<0> for StacktraceInfo { using ListLinks; });
-impl_list_arc_safe!(impl ListArcSafe<0> for StacktraceInfo { untracked });
+impl_list_arc_safe!(impl ListArcSafe<0> for StacktraceInfo { untracked; });
