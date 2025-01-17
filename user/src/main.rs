@@ -31,9 +31,10 @@ nix::ioctl_read!(
 nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
 nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
 nix::ioctl_none!(rkchk_switch_page, RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
-nix::ioctl_none!(rkchk_lsmod, RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
+nix::ioctl_read!(rkchk_refresh_mod, RKCHK_IOC_MAGIC, RKCHK_REFRESH_MOD_NR, usize);
 nix::ioctl_none!(rkchk_ls_hook_inline, RKCHK_IOC_MAGIC, RKCHK_GET_INLINE_HOOK_NR);
 nix::ioctl_read_buf!(rkchk_get_stacktrace, RKCHK_IOC_MAGIC, RKCHK_GET_STACKTRACE_NR, StackEntry);
+nix::ioctl_read_buf!(rkchk_get_mod, RKCHK_IOC_MAGIC, RKCHK_GET_MOD_NR, event::ioctl::LKM);
 
 
 impl Display for event::Events {
@@ -174,6 +175,22 @@ impl Display for StackEntry{
             }
         }
         Ok(())
+    }
+}
+
+impl Display for event::ioctl::LKM {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(name) = &self.name {
+            if let Ok(name) = CStr::from_bytes_until_nul(name) {
+                write!(f, "{:?}", name)
+            }
+            else {
+                write!(f, "{:?}", name)
+            }
+        }
+        else {
+            write!(f, "<hidden>")
+        }
     }
 }
 
@@ -355,8 +372,19 @@ fn run_integrity_check(fd: i32) {
         }
     }
 
+    let mut n : usize = 0;
     unsafe {
-        rkchk_lsmod(fd).unwrap();
+        rkchk_refresh_mod(fd, &mut n as _).unwrap();
+    }
+    if n != 0 {
+        println!("Printing list of module :");
+    }
+
+    let mut vec = Vec::new();
+    vec.resize(n, event::ioctl::LKM::default());
+    unsafe { rkchk_get_mod(fd, &mut vec).unwrap() };
+    for e in vec {
+        println!("  {}", e);
     }
 
     unsafe {

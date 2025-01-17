@@ -23,19 +23,22 @@ pub mod ioctl {
     /// Switch the kernel page to a saved one (ioctl sequence number)
     pub const RKCHK_SWITCH_PAGE_NR: u32 = 6;
     /// Print all the module in the linked list (ioctl sequence number)
-    pub const RKCHK_LSMOD_NR: u32 = 7;
+    pub const RKCHK_REFRESH_MOD_NR: u32 = 7;
     /// Print all the inline hook detected (ioctl sequence number)
     pub const RKCHK_GET_INLINE_HOOK_NR: u32 = 8;
-    /// Get a stack trace information
+    /// Get a stack trace information (ioctl sequence number)
     pub const RKCHK_GET_STACKTRACE_NR: u32 = 9;
+    /// Get the list of the refreshed module (ioctl sequence number)
+    pub const RKCHK_GET_MOD_NR: u32 = 10;
 
     use crate::event::{MODULE_NAME_SIZE, SIZE_STRING};
 
     /// Represent a loaded LKM
     #[repr(C)]
+    #[derive(Default, Clone)]
     pub struct LKM {
         /// Name of the LKM
-        pub name: [u8; MODULE_NAME_SIZE],
+        pub name: Option<[u8; MODULE_NAME_SIZE]>,
     }
 
     /// Represent a entry in the stacktrace with all the information gathered

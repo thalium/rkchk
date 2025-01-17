@@ -5,6 +5,7 @@ use core::ptr::addr_of;
 use core::str;
 use event::ioctl;
 use event::Events;
+use event::MODULE_NAME_SIZE;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::impl_has_list_links;
@@ -17,7 +18,6 @@ use kernel::list::ListLinks;
 use kernel::miscdevice;
 use kernel::miscdevice::MiscDevice;
 use kernel::miscdevice::MiscDeviceRegistration;
-use kernel::module::symbols_lookup_address;
 use kernel::module::symbols_lookup_name;
 use kernel::module::ModuleIter;
 use kernel::new_condvar;
@@ -62,12 +62,14 @@ pub mod response;
 pub mod stacktrace;
 
 use integrity::*;
+use kernel::uaccess::UserSliceWriter;
 use monitoring::*;
 use response::Response;
 use stacktrace::*;
 
 unsafe impl AsBytes for event::Events {}
 unsafe impl AsBytes for ioctl::StackEntry {}
+unsafe impl AsBytes for ioctl::LKM {}
 
 module! {
     type: RootkitDetection,
@@ -107,6 +109,59 @@ impl_has_list_links!(impl HasListLinks for KEvents { self.list_link });
 impl_list_item!(impl ListItem<0> for KEvents { using ListLinks; });
 impl_list_arc_safe!(impl ListArcSafe<0> for KEvents { untracked; });
 
+/// The list of detected mods
+#[pin_data]
+pub struct ModList {
+    vec: KVec<LKM>,
+    #[pin]
+    list_link: ListLinks<0>,
+}
+
+impl ModList {
+    /// Create a new ModList
+    pub fn new() -> Result<ListArc<Self>> {
+        let iter = ModuleIter::new().map(|e| {
+            let name: &[u8; 56] = &unsafe {
+                *(&(*e.as_ptr()).name as *const [i8; MODULE_NAME_SIZE]
+                    as *const [u8; MODULE_NAME_SIZE])
+            };
+
+            LKM {
+                name: Some(name.clone()),
+            }
+        });
+
+        let mut vec = KVec::new();
+        for e in iter {
+            vec.push(e, GFP_KERNEL)?;
+        }
+
+        ListArc::pin_init(
+            try_pin_init!(ModList {
+                list_link <- ListLinks::new(),
+                vec,
+            }),
+            GFP_KERNEL,
+        )
+    }
+    /// Get the len of the ModList
+    pub fn len(&self) -> usize {
+        self.vec.len()
+    }
+
+    /// Write the module to the user provided slice
+    pub fn write_to_user(&self, writer: &mut UserSliceWriter) -> Result<isize> {
+        for lkm in &self.vec {
+            writer.write(lkm)?;
+        }
+        Ok((size_of::<LKM>() * self.vec.len()) as _)
+    }
+}
+
+impl_has_list_links!(impl HasListLinks for ModList {self.list_link });
+impl_list_item!(impl ListItem<0> for ModList {using ListLinks; });
+impl_list_arc_safe!(impl ListArcSafe<0> for ModList {untracked; });
+
 /// The linked list on event and stacktrace
 /// And in a more general manner stack that contain all data that need to be stored before being
 /// fetched by the userspace programms
@@ -119,6 +174,8 @@ pub struct EventStack {
     event_stack: SpinLock<List<KEvents, 0>>,
     #[pin]
     stacktrace_stack: SpinLock<List<StacktraceInfo, 0>>,
+    #[pin]
+    lsmod_stack: SpinLock<List<ModList, 0>>,
 }
 
 impl EventStack {
@@ -128,7 +185,8 @@ impl EventStack {
                 x : 0,
                 wait_queue <- new_condvar!("data queue"),
                 event_stack <- new_spinlock!(List::new(), "event stack"),
-                stacktrace_stack <- new_spinlock!(List::new(), "stacktrace stack")
+                stacktrace_stack <- new_spinlock!(List::new(), "stacktrace stack"),
+                lsmod_stack <- new_spinlock!(List::new(), "lsmod stack"),
             }),
             GFP_KERNEL,
         )
@@ -167,6 +225,16 @@ impl EventStack {
     /// Return a stacktrace from the linked list of stacktrace (FIFO order)
     pub fn pop_stacktrace(&self) -> Option<ListArc<StacktraceInfo, 0>> {
         self.stacktrace_stack.lock().pop_back()
+    }
+
+    /// Push a collected list of module
+    pub fn push_lsmod(&self, lsmod: ListArc<ModList, 0>) {
+        self.lsmod_stack.lock().push_front(lsmod);
+    }
+
+    /// Pop a collected list of module (FIFO order)
+    pub fn pop_lsmod(&self) -> Option<ListArc<ModList, 0>> {
+        self.lsmod_stack.lock().pop_back()
     }
 }
 struct Communication {
@@ -234,13 +302,6 @@ impl MiscDevice for Communication {
                 }
 
                 writer.write::<event::Events>(event.get_ref_event())?;
-                /*let buf = unsafe {
-                    core::mem::transmute::<Events, [u8; core::mem::size_of::<Events>()]>(event)
-                };
-
-                for e in &buf {
-                    writer.write(e)?;
-                }*/
 
                 Ok(core::mem::size_of::<event::Events>() as _)
             }
@@ -251,9 +312,17 @@ impl MiscDevice for Communication {
                 Ok(0)
             }
 
-            RKCHK_LSMOD_NR => {
-                let module_iter = ModuleIter::new();
+            RKCHK_REFRESH_MOD_NR => {
+                let mut writer = user_slice.writer();
 
+                let mod_list = ModList::new()?;
+
+                writer.write(&mod_list.len())?;
+
+                data.events.push_lsmod(mod_list);
+
+                // This use the mod tree, for a future use
+                /*
                 for m in module_iter {
                     let mut offset = 0;
                     let mut symbolsize = 0;
@@ -265,9 +334,19 @@ impl MiscDevice for Communication {
                     } else {
                         pr_info!("Suspiciously hidden module !\n");
                     }
-                }
+                }*/
 
-                Ok(0)
+                Ok(size_of::<usize>() as _)
+            }
+
+            RKCHK_GET_MOD_NR => {
+                let mut writer = user_slice.writer();
+
+                if let Some(lsmod) = data.events.pop_lsmod() {
+                    lsmod.write_to_user(&mut writer)
+                } else {
+                    Ok(0)
+                }
             }
 
             RKCHK_GET_INLINE_HOOK_NR => {
