@@ -1,10 +1,9 @@
 //! Stacktrace information gathering and management crate
-use core::{fmt::Display, ops::Deref};
 
 use kernel::{
     alloc::{Flags, KVec},
     error::Result,
-    fmt, impl_has_list_links, impl_has_work, impl_list_arc_safe, impl_list_item,
+    impl_has_list_links, impl_has_work, impl_list_arc_safe, impl_list_item,
     init::InPlaceInit,
     list::{ListArc, ListLinks},
     macros::pin_data,
@@ -12,18 +11,14 @@ use kernel::{
     new_work, pin_init,
     prelude::GFP_KERNEL,
     stacktrace::Stacktrace,
-    str::{CStr, CString},
     sync::Arc,
     try_pin_init,
     uaccess::UserSliceWriter,
     workqueue::{Work, WorkItem},
 };
 
-use crate::{event::SIZE_STRING, EventStack, StackEntry};
-use crate::{
-    event::{Events, MODULE_NAME_SIZE},
-    KEvents,
-};
+use crate::{event::Events, KEvents};
+use crate::{write_to_slice, EventStack, StackEntry};
 
 /// Gather the information from a generated stacktrace
 
@@ -72,10 +67,10 @@ impl StacktraceWork {
 struct StacktraceInfoEntry {
     addr: u64,
     offset: u64,
-    symbol: Option<CString>,
-    module: Option<CString>,
+    symbol: Option<KVec<u8>>,
+    module: Option<KVec<u8>>,
 }
-
+/*
 impl Display for StacktraceInfoEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:x}", self.addr)?;
@@ -87,41 +82,15 @@ impl Display for StacktraceInfoEntry {
         }
         Ok(())
     }
-}
+}*/
 
 impl StackEntry {
     fn from_stackinfo(entry: &StacktraceInfoEntry) -> StackEntry {
         StackEntry {
             addr: entry.addr,
             offset: entry.offset,
-            name: if let Some(symbol) = &entry.symbol {
-                let mut name = [0; SIZE_STRING];
-                for (i, e) in symbol.as_bytes().iter().enumerate() {
-                    if let Some(c) = name.get_mut(i) {
-                        *c = *e;
-                    } else {
-                        unsafe { *name.get_unchecked_mut(SIZE_STRING - 1) = 0 };
-                        break;
-                    }
-                }
-                Some(name)
-            } else {
-                None
-            },
-            modname: if let Some(module) = &entry.module {
-                let mut modname = [0; MODULE_NAME_SIZE];
-                for (i, e) in module.as_bytes().iter().enumerate() {
-                    if let Some(c) = modname.get_mut(i) {
-                        *c = *e;
-                    } else {
-                        unsafe { *modname.get_unchecked_mut(MODULE_NAME_SIZE - 1) = 0 }
-                        break;
-                    }
-                }
-                Some(modname)
-            } else {
-                None
-            },
+            name: write_to_slice(&entry.symbol),
+            modname: write_to_slice(&entry.module),
         }
     }
 }
@@ -142,8 +111,8 @@ impl StacktraceInfo {
         for addr in stack.iter() {
             let mut offset = 0;
             let mut symbolsize = 0;
-            let (modname, symbol) = symbols_lookup_address(*addr, &mut offset, &mut symbolsize)?;
-
+            let (module, symbol) = symbols_lookup_address(*addr, &mut offset, &mut symbolsize)?;
+            /*
             let modname = match modname {
                 Some(modname) => Some(CString::try_from_fmt(fmt!(
                     "{}",
@@ -159,13 +128,13 @@ impl StacktraceInfo {
                 ))?),
                 None => None,
             };
-
+            */
             vec.push(
                 StacktraceInfoEntry {
                     addr: *addr,
                     offset,
                     symbol,
-                    module: modname,
+                    module,
                 },
                 GFP_KERNEL,
             )?;

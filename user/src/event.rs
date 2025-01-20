@@ -51,13 +51,27 @@ pub mod ioctl {
         pub modname: Option<[u8; MODULE_NAME_SIZE]>,
         /// Addr on the stack
         pub addr: u64,
-        /// Offset of the address respectivly to the stack
+        /// Offset of the address relatively to the symbol
         pub offset: u64,
     }
 
     /// Represent a detected inline hook in the kernel's text and the information gathered on it
     #[repr(C)]
-    pub struct InlineHook {}
+    #[derive(Default, Clone)]
+    pub struct InlineHookInfo {
+        /// Symbol
+        pub name: Option<[u8; SIZE_STRING]>,
+        /// Offset of the address respectivly to the symbol
+        pub offset: u64,
+        /// Name of the module
+        pub modname: Option<[u8; MODULE_NAME_SIZE]>,
+        /// Addr on the stack
+        pub addr: u64,
+        /// Opcode
+        pub opcode: [u8; 15],
+        /// Length of the opcode
+        pub opcode_len: u64,
+    }
 }
 
 /// Info of a loaded Kernel Module
@@ -183,4 +197,6 @@ pub enum Events {
     EnvPreload(EnvInfo),
     /// An available Stacktrace, contain the number of entry of type `StackEntry`
     Stacktrace(usize),
+    /// An inline hooks has been detected, more information should be gotten using the GET_INLINE_HOOK ioctl
+    InlineHookDetected,
 }

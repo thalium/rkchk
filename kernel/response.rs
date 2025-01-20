@@ -2,27 +2,27 @@
 
 //! The response part of rkchk
 
-use core::{ffi::c_void, ops::Range, slice};
+use core::ffi::c_void;
 
 use kernel::{
     alloc::{KVec, Vec},
     bindings,
     error::Error,
     init::PinInit,
-    module::symbols_lookup_address,
+    list::ListArc,
     new_mutex, page,
     pgtable::{self, lookup_address, Pgtable},
-    pin_init, pr_alert, pr_info,
+    pin_init, pr_alert,
     prelude::{pin_data, EINVAL, GFP_KERNEL},
-    str::{CStr, CString},
     sync::{
         lock::{mutex::MutexBackend, Guard},
         Mutex,
     },
 };
-use kernel::{fmt, insn};
 
 use kernel::error::Result;
+
+use crate::{event::Events, inline_hooks::InlineHook, EventStack, KEvents};
 /// Represent a copy of a kernel text page
 ///
 /// # Invariant :
@@ -96,7 +96,7 @@ impl KernelTextPage {
         })
     }
 
-    fn compare_page(&self) -> Result {
+    fn compare_page(&self) -> Result<KVec<ListArc<InlineHook>>> {
         let pgtable = pgtable::lookup_address(self.begin_addr)?;
         let order = pgtable.order();
         let n_pages = (2usize).pow(order);
@@ -107,53 +107,7 @@ impl KernelTextPage {
                 .compare_raw_multiple(self.begin_addr as *const u8, 0, n_bytes)
         }?;
 
-        pr_info!(
-            "We found {} difference, listing the corresponding symbols\n",
-            diffs.len()
-        );
-
-        if diffs.is_empty() {
-            pr_info!("Found no hook\n");
-        }
-
-        let mut last_range: Range<usize> = 0..0;
-
-        for diff in diffs {
-            if last_range.contains(&(diff as usize)) {
-                continue;
-            }
-            let mut offset = 0;
-            let mut symbolsize = 0;
-            let (modname, symbolname) =
-                symbols_lookup_address(diff as u64, &mut offset, &mut symbolsize)?;
-
-            let symbolname = match symbolname {
-                None => CString::try_from_fmt(fmt!("{:x}", diff as usize))?,
-                Some(vec) => CString::try_from_fmt(fmt!("{}", CStr::from_bytes_with_nul(&vec)?))?,
-            };
-            let modname = match modname {
-                None => CString::try_from_fmt(fmt!("kernel"))?,
-                Some(vec) => CString::try_from_fmt(fmt!("{}", CStr::from_bytes_with_nul(&vec)?))?,
-            };
-
-            // SAFETY : This is a pointer to kernel text so it's valid for 15 byte I hope
-            let buf = unsafe { slice::from_raw_parts(diff, 15) };
-
-            let mut insn = insn::Insn::new(buf);
-
-            let length = insn.get_length()?;
-
-            last_range = (diff as usize)..((diff as usize) + (length as usize));
-
-            pr_info!(
-                "Found a hook at {} + {:x} [{}] : opcode {:x}\n",
-                symbolname.to_str()?,
-                offset,
-                modname.to_str()?,
-                insn.get_opcode()?,
-            );
-        }
-        Ok(())
+        crate::inline_hooks::InlineHook::from_addr(diffs)
     }
 
     /// Switch between the saved page and the real page of the saved page in the page table
@@ -252,7 +206,7 @@ impl Response {
     }
 
     /// Compare the differents pages
-    pub fn compare_page(&self, id: usize) -> Result {
+    pub fn compare_page(&self, events: &EventStack, id: usize) -> Result {
         let mut lock = self.kernel_text.lock();
 
         let page = match lock.get_mut(id) {
@@ -260,6 +214,10 @@ impl Response {
             None => return Err(EINVAL),
         };
 
-        page.compare_page()
+        for hook in page.compare_page()? {
+            events.push_inline_hook(hook);
+            events.push_event(KEvents::new(Events::InlineHookDetected)?);
+        }
+        Ok(())
     }
 }

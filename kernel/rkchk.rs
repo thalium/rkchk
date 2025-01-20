@@ -6,6 +6,7 @@ use core::str;
 use event::ioctl;
 use event::Events;
 use event::MODULE_NAME_SIZE;
+use inline_hooks::InlineHook;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::impl_has_list_links;
@@ -33,29 +34,11 @@ use kernel::uaccess::UserSlice;
 pub mod event;
 
 use event::ioctl::*;
-/*
-/// Run all the integrity checks (ioctl command)
-const RKCHK_INTEG_ALL: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
-/// Read new events (ioctl command)
-const RKCHK_READ_EVENT: u32 = _IOR::<event::Events>(RKCHK_IOC_MAGIC, RKCHK_READ_EVENT_NR);
-/// Read number task_stuct (ioctl command)
-const RKCHK_NUMBER_TASK: u32 = _IOR::<usize>(RKCHK_IOC_MAGIC, RKCHK_NUMBER_TASK_NR);
-/// Read all pid (ioctl command)
-const RKCHK_PID_LIST: u32 =
-    _IOR::<[kernel::bindings::pid_t; 300]>(RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR);
-/// Read all pid (ioctl command)
-const RKCHK_TRACED_LIST: u32 =
-    _IOR::<[[u8; event::SIZE_STRING]; 20]>(RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR);
-/// Switch the kernel page to a saved one
-const RKCHK_SWITCH_PAGE: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
-/// Print all the module in the linked list
-const RKCHK_LSMOD_REFRESH: u32 = _IOR::<usize>(RKCHK_IOC_MAGIC, RKCHK_LSMOD_NR);
-/// Print all the inline hook detected
-const RKCHK_LS_INLINE_HOOK: u32 = _IO(RKCHK_IOC_MAGIC, RKCHK_LS_INLINE_HOOK_NR);
-*/
+
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
 pub mod fx_hash;
+pub mod inline_hooks;
 pub mod integrity;
 pub mod monitoring;
 pub mod response;
@@ -70,6 +53,7 @@ use stacktrace::*;
 unsafe impl AsBytes for event::Events {}
 unsafe impl AsBytes for ioctl::StackEntry {}
 unsafe impl AsBytes for ioctl::LKM {}
+unsafe impl AsBytes for ioctl::InlineHookInfo {}
 
 module! {
     type: RootkitDetection,
@@ -77,6 +61,24 @@ module! {
     author: "Rust for Linux Contributors",
     description: "Rust rootkit detection module",
     license: "GPL",
+}
+
+/// Write a possible absent vector to a zeroed fixed size array
+pub fn write_to_slice<const N: usize>(src: &Option<KVec<u8>>) -> Option<[u8; N]> {
+    if let Some(src) = src {
+        let mut dst = [0; N];
+        for (i, e) in src.iter().enumerate() {
+            if let Some(c) = dst.get_mut(i) {
+                *c = *e;
+            } else {
+                unsafe { *dst.get_unchecked_mut(N - 1) = 0 }
+                break;
+            }
+        }
+        Some(dst)
+    } else {
+        None
+    }
 }
 
 /// An event on the kernel side
@@ -176,6 +178,8 @@ pub struct EventStack {
     stacktrace_stack: SpinLock<List<StacktraceInfo, 0>>,
     #[pin]
     lsmod_stack: SpinLock<List<ModList, 0>>,
+    #[pin]
+    inline_hook_stack: SpinLock<List<InlineHook, 0>>,
 }
 
 impl EventStack {
@@ -187,6 +191,7 @@ impl EventStack {
                 event_stack <- new_spinlock!(List::new(), "event stack"),
                 stacktrace_stack <- new_spinlock!(List::new(), "stacktrace stack"),
                 lsmod_stack <- new_spinlock!(List::new(), "lsmod stack"),
+                inline_hook_stack <- new_spinlock!(List::new(), "inline hook stack"),
             }),
             GFP_KERNEL,
         )
@@ -235,6 +240,16 @@ impl EventStack {
     /// Pop a collected list of module (FIFO order)
     pub fn pop_lsmod(&self) -> Option<ListArc<ModList, 0>> {
         self.lsmod_stack.lock().pop_back()
+    }
+
+    /// Push a detected inline hook
+    pub fn push_inline_hook(&self, inline_hook: ListArc<InlineHook, 0>) {
+        self.inline_hook_stack.lock().push_front(inline_hook);
+    }
+
+    /// Pop a detected inline hook (FIFO order)
+    pub fn pop_inline_hook(&self) -> Option<ListArc<InlineHook, 0>> {
+        self.inline_hook_stack.lock().pop_back()
     }
 }
 struct Communication {
@@ -289,6 +304,7 @@ impl MiscDevice for Communication {
                 data.integrity_check.msr_integ.check_msr_lstar()?;
 
                 data.integrity_check.cf_integ.check_custom_hook()?;
+                data.response.compare_page(&data.events, 0)?;
 
                 Ok(0)
             }
@@ -350,9 +366,13 @@ impl MiscDevice for Communication {
             }
 
             RKCHK_GET_INLINE_HOOK_NR => {
-                data.response.compare_page(0)?;
+                let mut writer = user_slice.writer();
 
-                Ok(0)
+                if let Some(inline_hook) = data.events.pop_inline_hook() {
+                    inline_hook.write_to_user(&mut writer)
+                } else {
+                    Ok(0)
+                }
             }
 
             RKCHK_GET_STACKTRACE_NR => {

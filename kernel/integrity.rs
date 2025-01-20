@@ -257,7 +257,7 @@ impl FunctionIntegrity {
     /// Iter through all the saved functions.
     /// Get the current text's hash and compare it with the saved one.
     pub fn check_functions(&self) -> Result<()> {
-        pr_info!("Checking for function integrity\n");
+        //pr_info!("Checking for function integrity\n");
         for (name, hash) in &self.saved_function {
             let new_hash = self.get_function_hash(&name)?;
             if new_hash != *hash {
@@ -299,7 +299,7 @@ impl CFIntegrity {
     /// Check the first instruction of the function "name" to see if it isn't hooked.
     /// The check consist to see if this instruction isn't a breakpoint or a jump
     pub fn check_custom_hook(&self) -> Result {
-        pr_info!("Checking for custom hook\n");
+        //pr_info!("Checking for custom hook\n");
         for fct_name in &self.checked_function {
             let addr = module::symbols_lookup_name(fct_name);
 
