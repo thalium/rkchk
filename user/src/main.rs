@@ -1,4 +1,5 @@
 use nix::{self, Result};
+use rustc_demangle::demangle;
 use nix::errno::Errno;
 use nix::fcntl;
 use nix::libc::{pid_t, sleep};
@@ -160,7 +161,8 @@ impl Display for StackEntry{
         write!(f, "{:x}", self.addr)?;
         if let Some(symbol) = &self.name {
             if let Ok(symbol) = CStr::from_bytes_until_nul(symbol) {
-                write!(f, " : {:?} + {:x}",symbol, self.offset)?;
+                let symbol_demangled = demangle(symbol.to_str().unwrap());
+                write!(f, " : {} + {:x}",symbol_demangled, self.offset)?;
             }
             else {
                 write!(f, " : {:?}", symbol)?;
@@ -199,7 +201,8 @@ impl Display for event::ioctl::InlineHookInfo {
         write!(f, "{:x}", self.addr)?;
         if let Some(symbol) = &self.name {
             if let Ok(symbol) = CStr::from_bytes_until_nul(symbol) {
-                write!(f, " : {:?} + {:x}",symbol, self.offset)?;
+                let symbol_demangled = demangle(symbol.to_str().unwrap());
+                write!(f, " : {:?} + {:x}",symbol_demangled, self.offset)?;
             }
             else {
                 write!(f, " : {:?}", symbol)?;

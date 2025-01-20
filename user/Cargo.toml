@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rustc-demangle = "0.1"
 nix = {version = "0.29.0" , features = ["ioctl", "fs", "process", "signal", "kmod"]}
 signal-hook = "0.3.17"
