@@ -51,7 +51,7 @@ impl InlineHook {
             let (modname, symbolname) =
                 symbols_lookup_address(addr as u64, &mut offset, &mut symbolsize)?;
 
-            // SAFETY : This is a pointer to kernel text so it's valid for 15 byte I hope
+            // SAFETY: This is a pointer to kernel text so it's valid for 15 byte I hope
             let buf = unsafe { slice::from_raw_parts(addr, 15) };
 
             let mut insn = insn::Insn::new(buf);

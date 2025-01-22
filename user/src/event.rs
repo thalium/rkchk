@@ -37,8 +37,17 @@ pub mod ioctl {
     #[repr(C)]
     #[derive(Default, Clone)]
     pub struct LKM {
+        // Address of the name array
+        //pub addr: u64,
         /// Name of the LKM
         pub name: Option<[u8; MODULE_NAME_SIZE]>,
+        // Presence of the LKM in the different registration structures
+        // Linked list
+        //pub linked_list: bool,
+        // `mod_tree`
+        //pub mod_tree: bool,
+        // `kobject`
+        //pub kobject: bool,
     }
 
     /// Represent a entry in the stacktrace with all the information gathered

@@ -38,6 +38,7 @@ use event::ioctl::*;
 static mut COMMUNICATION: Option<Arc<Communication>> = None;
 
 pub mod fx_hash;
+pub mod hidden_module;
 pub mod inline_hooks;
 pub mod integrity;
 pub mod monitoring;
@@ -127,6 +128,17 @@ impl ModList {
                 *(&(*e.as_ptr()).name as *const [i8; MODULE_NAME_SIZE]
                     as *const [u8; MODULE_NAME_SIZE])
             };
+
+            /*let mut offset = 0;
+            let mut symbolsize = 0;
+            let (modname, _) =
+                symbols_lookup_address(m.as_ptr() as _, &mut offset, &mut symbolsize)?;
+            if let Some(modname) = modname {
+                let name = CStr::from_bytes_with_nul(&modname)?;
+                pr_info!("Found also the module : {:?}\n", name);
+            } else {
+                pr_info!("Suspiciously hidden module !\n");
+            } */
 
             LKM {
                 name: Some(name.clone()),
@@ -306,6 +318,8 @@ impl MiscDevice for Communication {
                 data.integrity_check.cf_integ.check_custom_hook()?;
                 data.response.compare_page(&data.events, 0)?;
 
+                hidden_module::detect_stray_struct_module();
+
                 Ok(0)
             }
             RKCHK_READ_EVENT_NR => {
@@ -336,21 +350,6 @@ impl MiscDevice for Communication {
                 writer.write(&mod_list.len())?;
 
                 data.events.push_lsmod(mod_list);
-
-                // This use the mod tree, for a future use
-                /*
-                for m in module_iter {
-                    let mut offset = 0;
-                    let mut symbolsize = 0;
-                    let (modname, _) =
-                        symbols_lookup_address(m.as_ptr() as _, &mut offset, &mut symbolsize)?;
-                    if let Some(modname) = modname {
-                        let name = CStr::from_bytes_with_nul(&modname)?;
-                        pr_info!("Found also the module : {:?}\n", name);
-                    } else {
-                        pr_info!("Suspiciously hidden module !\n");
-                    }
-                }*/
 
                 Ok(size_of::<usize>() as _)
             }

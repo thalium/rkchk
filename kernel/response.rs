@@ -54,12 +54,12 @@ unsafe fn switch(vaddr: usize, new_pfn: u64) -> Result<u64> {
 
     let old_pfn = pgtable.pfn();
 
-    // SAFETY : According to the safety contract of the function `new_pfn` is of the same order as
+    // SAFETY: According to the safety contract of the function `new_pfn` is of the same order as
     // `pgprot`'s order.
     // The call to `flush_tlb` is made below.
     unsafe { pgtable.set_pgtable(new_pfn, pgprot) };
 
-    // SAFETY : Just an FFI call.
+    // SAFETY: Just an FFI call.
     unsafe { bindings::flush_tlb_each_cpu(vaddr as _) };
     Ok(old_pfn)
 }
@@ -82,7 +82,7 @@ impl KernelTextPage {
             return Err(EINVAL);
         }
 
-        // SAFETY : We read from the kernel text directly
+        // SAFETY: We read from the kernel text directly
         unsafe { _page.write_raw_multiple(address, 0, n_bytes)? };
 
         let begin_pfn = lookup_address(address as _)?.pfn();
@@ -114,7 +114,7 @@ impl KernelTextPage {
     fn switch(&mut self) -> Result<()> {
         // We transition from the original page to the copied page
         if !self.is_switched {
-            // SAFETY : `_page` is valid due to the type invariant.
+            // SAFETY: `_page` is valid due to the type invariant.
             // A call to kunmap_local is made at the end of the function
             let mapped_addr: *mut c_void =
                 unsafe { bindings::kmap_local_page(self._page.as_ptr()) };
@@ -124,28 +124,28 @@ impl KernelTextPage {
 
             let mapped_pgtable =
                 pgtable::lookup_address(mapped_addr as _).or_else(|err| -> Result<_, Error> {
-                    // SAFETY : `mapped_addr` is not null and we unmap in the reverse order in which we map
+                    // SAFETY: `mapped_addr` is not null and we unmap in the reverse order in which we map
                     unsafe { bindings::kunmap_local(mapped_addr as _) };
                     Err(err)
                 })?;
 
             let pfn = mapped_pgtable.pfn();
 
-            // SAFETY : According to the type invariant `begin_addr`'s order is the same as `mapped_pgtable`'s pfn's order
+            // SAFETY: According to the type invariant `begin_addr`'s order is the same as `mapped_pgtable`'s pfn's order
             unsafe { switch(self.begin_addr, pfn) }.or_else(|err| -> Result<_, Error> {
-                // SAFETY : `mapped_addr` is not null and we unmap in the reverse order in which we map
+                // SAFETY: `mapped_addr` is not null and we unmap in the reverse order in which we map
                 unsafe { bindings::kunmap_local(mapped_addr as _) };
                 Err(err)
             })?;
 
             // We don't care about the returned pfn, we can get it using the `_page` virtual address.
-            // SAFETY : `mapped_addr` is not null and we unmap in the reverse order in which we map
+            // SAFETY: `mapped_addr` is not null and we unmap in the reverse order in which we map
             unsafe { bindings::kunmap_local(mapped_addr as _) };
         }
         // We transition from the copied page to the original page
         else {
             // We don't care about the returned pfn, we can get it using the `_page` virtual address.
-            // SAFETY : According to type invariant `begin_addr`'s order is the same as `begin_pfn` order
+            // SAFETY: According to type invariant `begin_addr`'s order is the same as `begin_pfn` order
             unsafe { switch(self.begin_addr, self.begin_pfn)? };
         }
         self.is_switched = !self.is_switched;
