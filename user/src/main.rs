@@ -184,15 +184,19 @@ impl Display for event::ioctl::LKM {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(name) = &self.name {
             if let Ok(name) = CStr::from_bytes_until_nul(name) {
-                write!(f, "{:?}", name)
+                write!(f, "{:?}", name)?;
             }
             else {
-                write!(f, "{:?}", name)
+                write!(f, "{:?}", name)?;
             }
         }
         else {
-            write!(f, "<hidden>")
+            write!(f, "<hidden>")?;
         }
+        if !self.linked_list {
+            write!(f, " WARNING : This modules tried to hide himself !")?;
+        }
+        Ok(())
     }
 }
 

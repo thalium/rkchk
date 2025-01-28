@@ -4,9 +4,12 @@
 
 use core::ffi::CStr;
 
-use kernel::bindings::{p4d_t, pgd_t, pmd_t, pte_t, pud_t};
+use kernel::alloc::KVec;
+use kernel::bindings::{p4d_t, pgd_t, pmd_t, pud_t};
 
-use kernel::{current, pr_err, pr_info};
+use kernel::error::Result;
+use kernel::prelude::GFP_KERNEL;
+use kernel::{pr_err, pr_info};
 
 fn is_in_module_space(addr: u64) -> bool {
     // SAFETY: This function is always safe to call
@@ -43,12 +46,13 @@ fn is_valid_addr_range(addr: u64, end: u64) -> bool {
     }
 
     let mut level: u32 = 0;
+    // Return the page table and it's level, it return `NULL` if the address is not mapped
     let top_pat = unsafe { kernel::bindings::lookup_address(addr, &mut level as _) };
-
     if top_pat.is_null() {
         return false;
     }
 
+    // Because the `lookup_address` function can return a non present page we check that the page is effectivly present
     if unsafe {
         match level {
             kernel::bindings::pg_level_PG_LEVEL_4K => kernel::bindings::pte_present(*top_pat),
@@ -56,7 +60,7 @@ fn is_valid_addr_range(addr: u64, end: u64) -> bool {
                 kernel::bindings::pmd_present(*(top_pat as *mut pmd_t))
             }
             kernel::bindings::pg_level_PG_LEVEL_1G => {
-                kernel::bindings::pud_present(*(top_pat as *mut put_t))
+                kernel::bindings::pud_present(*(top_pat as *mut pud_t))
             }
             kernel::bindings::pg_level_PG_LEVEL_512G => {
                 kernel::bindings::p4d_present(*(top_pat as *mut p4d_t))
@@ -74,6 +78,9 @@ fn is_valid_addr_range(addr: u64, end: u64) -> bool {
         return false;
     }
 
+    // We checked the validity for at least the page of `addr`
+    // Therefor we can check the address starting from the following page
+    // This code advance to the next page
     let new_addr = ((addr >> kernel::bindings::PAGE_SHIFT) + 1) << kernel::bindings::PAGE_SHIFT;
 
     is_valid_addr_range(new_addr, end)
@@ -86,6 +93,7 @@ impl Iterator for ModuleAddressIter {
             return None;
         }
 
+        // We check that the cursor is pointing to a valid address range `(addr..(addr + size_of(module)))`
         loop {
             let end_cursor = match self
                 .cursor
@@ -99,6 +107,7 @@ impl Iterator for ModuleAddressIter {
                 break;
             }
 
+            // The cursor isn't valid, we advance it with the alignement of the structure `module`
             self.cursor = match self
                 .cursor
                 .checked_add(align_of::<kernel::bindings::module>() as u64)
@@ -121,8 +130,9 @@ impl Iterator for ModuleAddressIter {
     }
 }
 
-pub fn detect_stray_struct_module() {
+pub fn detect_stray_struct_module() -> Result<KVec<*const kernel::bindings::module>> {
     let iter = ModuleAddressIter::new();
+    let mut res = KVec::new();
     pr_info!("We search for module\n");
     for addr in iter {
         let mut score = 0;
@@ -174,14 +184,18 @@ pub fn detect_stray_struct_module() {
             score += 1
         }
 
-        if score >= 3 {
-            pr_info!(
+        // Exerience show that we need to check all the condition to be a module
+        // I might add more check in the future to have a more resilient checking
+        if score >= 5 {
+            /*pr_info!(
                 "We found a module, score {}, name : {:?}",
                 score,
                 CStr::from_bytes_until_nul(
                     unsafe { *(&(*addr).name as *const [i8; 56] as *const [u8; 56]) }.as_slice(),
                 )
-            );
+            );*/
+            res.push(addr, GFP_KERNEL)?;
         }
     }
+    Ok(res)
 }

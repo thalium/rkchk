@@ -123,6 +123,7 @@ pub struct ModList {
 impl ModList {
     /// Create a new ModList
     pub fn new() -> Result<ListArc<Self>> {
+        // We iter through all the modules in the module's linked list
         let iter = ModuleIter::new().map(|e| {
             let name: &[u8; 56] = &unsafe {
                 *(&(*e.as_ptr()).name as *const [i8; MODULE_NAME_SIZE]
@@ -142,13 +143,45 @@ impl ModList {
 
             LKM {
                 name: Some(name.clone()),
+                linked_list: true,
             }
         });
-
         let mut vec = KVec::new();
         for e in iter {
             vec.push(e, GFP_KERNEL)?;
         }
+
+        // We get the list of module from the bruteforce technique
+        let full_module_list: KVec<*const kernel::bindings::module> =
+            hidden_module::detect_stray_struct_module()?;
+        let full_module_list = full_module_list.into_iter().map(|e| -> &[u8; 56] {
+            unsafe {
+                &*(&(*e).name as *const [i8; MODULE_NAME_SIZE] as *const [u8; MODULE_NAME_SIZE])
+            }
+        });
+
+        // We search for module found with the bruteforce technique that are not in the linked list
+        let mut tmp_vec = KVec::new();
+        for module in full_module_list {
+            if let None = vec.iter().find(|e| {
+                if let Some(ref name) = e.name {
+                    name == module
+                } else {
+                    false
+                }
+            }) {
+                tmp_vec.push(
+                    LKM {
+                        name: Some(module.clone()),
+                        linked_list: false,
+                    },
+                    GFP_KERNEL,
+                )?;
+            }
+        }
+
+        // We add thoses suspicious modules in the vector
+        vec.extend_from_slice(&tmp_vec, GFP_KERNEL)?;
 
         ListArc::pin_init(
             try_pin_init!(ModList {
@@ -317,8 +350,6 @@ impl MiscDevice for Communication {
 
                 data.integrity_check.cf_integ.check_custom_hook()?;
                 data.response.compare_page(&data.events, 0)?;
-
-                hidden_module::detect_stray_struct_module();
 
                 Ok(0)
             }

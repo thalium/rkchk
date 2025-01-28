@@ -43,7 +43,7 @@ pub mod ioctl {
         pub name: Option<[u8; MODULE_NAME_SIZE]>,
         // Presence of the LKM in the different registration structures
         // Linked list
-        //pub linked_list: bool,
+        pub linked_list: bool,
         // `mod_tree`
         //pub mod_tree: bool,
         // `kobject`
