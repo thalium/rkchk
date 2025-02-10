@@ -18,6 +18,8 @@ use kernel::bindings;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::fprobe::FprobeOperations;
+use kernel::fs::file::flags;
+use kernel::fs::File;
 use kernel::list::ListArc;
 use kernel::module::is_kernel;
 use kernel::module::is_module;
@@ -654,6 +656,64 @@ impl FprobeOperations for SysExecve {
     }
 }
 
+struct DoFilpOpen;
+
+const SENSIBLE_FILE: [&CStr; 2] = [&c_str!("ld.preload.so"), &c_str!("ld-linux-x86-64.so")];
+
+impl FprobeOperations for DoFilpOpen {
+    type Data = Arc<EventStack>;
+    type EntryData = Option<&'static CStr>;
+
+    fn entry_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        entry_ip: usize,
+        ret_ip: usize,
+        regs: &bindings::pt_regs,
+        entry_data: Option<&mut Self::EntryData>,
+    ) -> Option<()> {
+        if let Some(entry_data) = entry_data {
+            let pathname = regs.si as *const bindings::filename;
+
+            // SAFETY : It's a valid pointer according to the function's usage of the pointer
+            let namep = unsafe { (*pathname).name } as *const i8;
+
+            // SAFETY : namep is a valid pointer to a null terminated string
+            let name_slice = unsafe { CStr::from_char_ptr(namep) };
+
+            for sensible in &SENSIBLE_FILE {
+                if name_slice.ends_with(*sensible) {
+                    *entry_data = Some(*sensible);
+                    return Some(());
+                }
+            }
+        }
+        return None;
+    }
+    fn exit_handler(
+        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        entry_ip: usize,
+        ret_ip: usize,
+        regs: &bindings::pt_regs,
+        entry_data: Option<&mut Self::EntryData>,
+    ) {
+        if let Some(option) = entry_data {
+            if let Some(name) = option {
+                let file = unsafe { File::from_raw_file(regs.ax as *const bindings::file) };
+
+                if file.flags() | flags::O_RDWR != 0 || file.flags() | flags::O_WRONLY != 0 {
+                    pr_alert!("Opened {:?} with write mode\n", name);
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+}
+
 struct SysExecveat;
 
 impl FprobeOperations for SysExecveat {
@@ -750,4 +810,5 @@ probes!(probe call_usermodehelper => UsermodehelperProbe;
         probe check_helper_call => CheckHelperCall;
         probe __x64_sys_getdents64 => SysGetDents64;
         probe __x64_sys_execve => SysExecve;
-        probe __x64_sys_execveat => SysExecveat);
+        probe __x64_sys_execveat => SysExecveat;
+        probe do_filp_open => DoFilpOpen);
