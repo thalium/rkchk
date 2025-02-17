@@ -116,6 +116,8 @@ Because a process want to be scheduled it need to be in this list so it's quite 
 
 ## 10 - Write capable eBPF helper usage
 
+Inspired by the (Aqua tracee's check)[https://aquasecurity.github.io/tracee/latest/docs/events/builtin/extra/bpf_attach/].
+
 eBPF programms are very limited in terms of write capacity. 
 They can't write directly to pointer they receive (from kernel or userspace). 
 The only way they have to modify user or kernel data is through a limited number of helpers : 
@@ -125,6 +127,42 @@ The only way they have to modify user or kernel data is through a limited number
 We can detect the usage of thoses function during the verifying step of the eBPF program loading process. 
 We hook into `check_helper_call` which is called for each function the verifier encounter. 
 This allow us to check if a programm contains helper capable of modifying it's environment.
+
+## 11 - Bruteforcing the LKM address space
+
+Inspired by the [Phrack article](https://phrack.org/issues/71/12#article). 
+
+To hide themselves, LKM rootkit must remove themselves from 3 structures the kernel use to keep track of the modules. Most of them remove themselves from only one or two, which allow us to find them by integrity checks, however if the rootkit remove themselves from all of the structures.
+The idea is to find all the kernel module in the kernel module address space by iterating over it, finding all the allocated spaces and in it trying to match with a `struct module` using the knowledge that somes of the fields of these structure have specific value for exemple : 
+- name : A null terminated string of at most 56 characters
+- state : An enum
+- entry : A pointer in the module address space
+...
+
+This allow us to retrieve all the LKM in the kernel.
+
+
+## 12 - Integrity check on all kernel text page 
+
+A copy of one of the kernel text pages (~ 2 MB) is realized at rkchk's loading and is regularly compared with the actual kernel's page. This allow us to find inlines hooks, the placed opcode and the hooked function. More useful for post mortem analysis than a integrity check using the hash of the whole page.
+
+
+## 13 - List the activated probes
+
+Inspired by a [TODO list in KoviD's repo](https://github.com/carloslack/KoviD/blob/master/TODO.txt).
+
+When using the kernel's API to place probes in the kernel thoses probes are listed in `/sys/kernel/debug/tracing/enabled_functions`. Therefor we can see the probes that are not placed by rkchk and report them.
+
+## 14 - Write on sensible files 
+
+The main way (and to my knowledge the only one) for an userspace rootkit to hook itself to system's library is to add their library to `ld.so.preload` so their library is loaded before all the others. Another more discret way is to modify directly `ld.so` such that it uses another configuration file (that's what [Bedevil](https://github.com/Error996/bdvl) do). 
+
+Therefor to detect userspace rootkit installation we can check the open syscall with write flag set on thoses files.
+
+## 15 - Getting stacktrace
+
+Using the stack unwinder of the kernel we dump the stacktrace each time a suspicious kernel API call is made (for the moment `kallsym_lookup_name` calls on suspicious symbols to detect kprobe's tricks usage). 
+
 
 # Available response
 
@@ -144,35 +182,60 @@ The available response is the equivalent of a `kill -9 <pid>`.
 
 # Rootkit tested and detected
 
-## LKM Rootkits :
+## LKM Rootkits
 
-### Reptile : 
+### Reptile
 
 Source : https://github.com/f0rb1dd3n/Reptile
 
-### Diamorphine : 
+### Diamorphine
 
 Source : https://github.com/m0nad/Diamorphine
 
-#### Detection :
+(only worked on 6.3 kernel)
+
+#### Detection
     1 / 3 / 4
 
 ### reveng_rtkit 
 
 Source : https://github.com/reveng007/reveng_rtkit
 
-#### Detection :
+(only worked on 6.3 kernel)
+
+#### Detection
     1 / 3 / 4
 
-### Reptile improved :
+### Reptile improved
 
-Source : https://gitlab.hades.lan/t026/reptile
-
-#### Detection :
+#### Detection
 If loaded after rkchk :
-    1-1 / 2 / 7
+
+    1-1 / 2 / 7 / 11 / 12
+
 If loaded before rkchk :
-    1-1 / 7
+
+    1-1 / 7 / 11
+
+### KoviD
+
+Source : https://github.com/carloslack/KoviD
+
+#### Detection 
+
+    11 / 12 / 13
+
+## Userspace rootkits 
+
+### Bedevil 
+
+Source : https://github.com/Error996/bdvl
+
+#### Detection
+
+If loaded before rkchk : 
+
+    14
 
 ## eBPF rootkits
 
@@ -180,7 +243,7 @@ If loaded before rkchk :
 
 Source : https://github.com/h3xduck/TripleCross
 
-#### Result : 
+#### Result
 
 The rootkit don't load because of a failed check during the verifying process : 
 ```
@@ -194,7 +257,7 @@ I suppose that it's because the verifier became stricter since the version of th
 
 Source : https://github.com/Gui774ume/ebpfkit
 
-#### Result :
+#### Result
 
 The rootkit don't load because of a failed check during the verifying process : 
 ```
@@ -202,3 +265,5 @@ The rootkit don't load because of a failed check during the verifying process :
 R3 offset is outside of the packet
 ```
 Same as before.
+
+
