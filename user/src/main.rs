@@ -396,7 +396,9 @@ impl Threat for Process {
 
 fn run_integrity_check(fd: i32) {
     unsafe {
-        rkchk_run_all_integ(fd).unwrap();
+        if let Err(err) = rkchk_run_all_integ(fd) {
+            println!("Error running the integrity checks : {:?}", err);
+        }
     }
 
     let traced_functions = check_ftrace_hook(fd).unwrap();

@@ -13,6 +13,7 @@ use kernel::bindings;
 use kernel::c_str;
 use kernel::error::Result;
 use kernel::module::symbols_lookup_name;
+use kernel::module::SymbolInfo;
 use kernel::prelude::*;
 use kernel::str::CStr;
 use kernel::str::CString;
@@ -299,10 +300,21 @@ impl CFIntegrity {
     /// Check the first instruction of the function "name" to see if it isn't hooked.
     /// The check consist to see if this instruction isn't a breakpoint or a jump
     pub fn check_custom_hook(&self) -> Result {
-        //pr_info!("Checking for custom hook\n");
-        for fct_name in &self.checked_function {
-            let addr = module::symbols_lookup_name(fct_name);
+        let events = self.events.clone();
 
+        let symbol_info = SymbolInfo::try_new()?;
+
+        let closure = move |buffer: &[u8; 512], addr: u64| -> Result<()> {
+            if !(buffer[0] == 't' as u8 || buffer[0] == 'T' as u8) {
+                return Ok(());
+            }
+
+            // We filter out the static tracing methods handlers and the start function of the kernel
+            if buffer.starts_with(c_str!("T__SCT__").as_bytes())
+                || buffer.starts_with(c_str!("T__static_call_text_start"))
+            {
+                return Ok(());
+            }
             // SAFETY:
             // 1- The object we manipulate is code so it should not be deallocated, except if the module we look at is unloaded (TODO : find a way to ensure that the module is not unloaded)
             // 2- addr is non null and aligned (because we ask for 1 byte data)
@@ -315,25 +327,35 @@ impl CFIntegrity {
 
             let opcode = diss.get_opcode()?;
 
-            if opcode == X86_OP_BP || opcode == X86_OP_JMP {
-                /*pr_alert!(
-                    "Function : {} probably hooked using opcode {:#02x}\n",
+            if opcode == X86_OP_JMP {
+                /*let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
+                pr_alert!(
+                    "Function : {:?} probably hooked using opcode {:#02x} at addr : {:x} and we have {:x}\n",
                     fct_name,
-                    opcode
-                );*/
+                    opcode,
+                    addr,
+                    tab[0]
+                ); */
                 let mut buf = [0 as u8; event::SIZE_STRING];
-                for (i, e) in fct_name.as_bytes().iter().enumerate() {
+                for (i, e) in buffer.iter().enumerate() {
                     let b = match buf.get_mut(i) {
                         None => break,
                         Some(b) => b,
                     };
                     *b = *e;
+                    if *e == 0 {
+                        break;
+                    }
                 }
 
                 let event = event::Events::HookedFunction(event::FunctionInfo { name: buf });
-                self.events.push_event(KEvents::new(event)?);
+                events.push_event(KEvents::new(event)?);
             }
-        }
+            Ok(())
+        };
+
+        symbol_info.on_each(closure)?;
+
         Ok(())
     }
 }
