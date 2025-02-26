@@ -339,8 +339,7 @@ impl MiscDevice for Communication {
                 Ok((core::mem::size_of::<[u8; event::SIZE_STRING]>() * nb) as _)
             }
             RKCHK_INTEG_ALL_NR => {
-                let res = Ok(0);
-
+                let mut res = Ok(0);
                 if let Err(err) = data.integrity_check.function_integ.check_functions() {
                     res = Err(err);
                 }
@@ -360,6 +359,7 @@ impl MiscDevice for Communication {
                 if let Err(err) = data.integrity_check.cf_integ.check_custom_hook() {
                     res = Err(err);
                 }
+
                 if let Err(err) = data.response.compare_page(&data.events, 0) {
                     res = Err(err);
                 }
