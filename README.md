@@ -6,6 +6,71 @@ Written entierly in Rust using the Linux Rust API. See the corresponding linux f
 
 This module was designed to be used mostly on `x86_64` architecture, but some check are non architectural dependent.
 
+# Installation guide
+
+## Installing the Linux kernel 
+
+To run this detection tool you need to first install a custom linux kernel. This kernel is provided in a separated git repo.
+
+### Installing Rust toolchain
+
+The linux kernel will need to be compiled with Rust support, for that I advice to check out [this page](https://docs.kernel.org/rust/quick-start.html).
+
+To be sure that rust can be activated you can run in the kernel source tree : 
+
+```
+make rustavailable
+```
+
+### Configuring the kernel
+
+Then to activate Rust you first need to make a default config, for example with : 
+```
+make defconfig
+```
+
+Then you can activate various configuration option with :
+
+```
+make menuconfig
+```
+
+Precisly you need to activate : 
+```
+RUST
+FUNCTION_TRACER
+FPROBE
+```
+
+(those are activated in most major distribution's kernel by default)
+
+### Compiling the kernel
+
+You can now compile the kernel with Rust (so LLVM) activated.
+
+```
+make LLVM=1 vmlinux
+```
+
+For a easy to use result you can make the build process produce a package. To see the different package format supported you can do :
+
+```
+make help
+```
+
+For example for debian you can do :
+
+```
+make LLVM=1 bindeb-pkg
+```
+
+And then install the .deb generated.
+
+## Installing our tool 
+
+
+
+
 # Available checks
 
 ## 1- Module name presence in list

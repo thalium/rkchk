@@ -328,14 +328,14 @@ impl CFIntegrity {
             let opcode = diss.get_opcode()?;
 
             if opcode == X86_OP_JMP {
-                /*let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
+                let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
                 pr_alert!(
                     "Function : {:?} probably hooked using opcode {:#02x} at addr : {:x} and we have {:x}\n",
                     fct_name,
                     opcode,
                     addr,
                     tab[0]
-                ); */
+                );
                 let mut buf = [0 as u8; event::SIZE_STRING];
                 for (i, e) in buffer.iter().enumerate() {
                     let b = match buf.get_mut(i) {

@@ -1,21 +1,18 @@
-use nix::{self, Result};
-use rustc_demangle::demangle;
-use nix::errno::Errno;
+use nix;
 use nix::fcntl;
-use nix::libc::{pid_t, sleep};
+use nix::libc::pid_t;
 use nix::sys::signal;
 use nix::sys::signal::Signal::SIGKILL;
 use nix::sys::stat::Mode;
 use nix::unistd::Pid;
-use std::borrow::Borrow;
-use std::ffi::{CStr, CString};
-use std::fmt::{write, Display};
-use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-use std::{fs, str, thread};
+use rustc_demangle::demangle;
+use std::ffi::CStr;
+use std::fmt::Display;
 use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
+use std::{fs, thread};
 nix::ioctl_none!(rkchk_run_all_integ, RKCHK_IOC_MAGIC, RKCHK_INTEG_ALL_NR);
 nix::ioctl_read!(
     rkchk_read_event,
@@ -30,13 +27,37 @@ nix::ioctl_read!(
     usize
 );
 nix::ioctl_read_buf!(rkchk_pid_list, RKCHK_IOC_MAGIC, RKCHK_PID_LIST_NR, pid_t);
-nix::ioctl_read_buf!(rkchk_traced_list, RKCHK_IOC_MAGIC, RKCHK_TRACED_LIST_NR, [u8; event::SIZE_STRING]);
+nix::ioctl_read_buf!(
+    rkchk_traced_list,
+    RKCHK_IOC_MAGIC,
+    RKCHK_TRACED_LIST_NR,
+    [u8; event::SIZE_STRING]
+);
 nix::ioctl_none!(rkchk_switch_page, RKCHK_IOC_MAGIC, RKCHK_SWITCH_PAGE_NR);
-nix::ioctl_read!(rkchk_refresh_mod, RKCHK_IOC_MAGIC, RKCHK_REFRESH_MOD_NR, usize);
-nix::ioctl_read!(rkchk_get_hook_inline, RKCHK_IOC_MAGIC, RKCHK_GET_INLINE_HOOK_NR, InlineHookInfo);
-nix::ioctl_read_buf!(rkchk_get_stacktrace, RKCHK_IOC_MAGIC, RKCHK_GET_STACKTRACE_NR, StackEntry);
-nix::ioctl_read_buf!(rkchk_get_mod, RKCHK_IOC_MAGIC, RKCHK_GET_MOD_NR, event::ioctl::LKM);
-
+nix::ioctl_read!(
+    rkchk_refresh_mod,
+    RKCHK_IOC_MAGIC,
+    RKCHK_REFRESH_MOD_NR,
+    usize
+);
+nix::ioctl_read!(
+    rkchk_get_hook_inline,
+    RKCHK_IOC_MAGIC,
+    RKCHK_GET_INLINE_HOOK_NR,
+    InlineHookInfo
+);
+nix::ioctl_read_buf!(
+    rkchk_get_stacktrace,
+    RKCHK_IOC_MAGIC,
+    RKCHK_GET_STACKTRACE_NR,
+    StackEntry
+);
+nix::ioctl_read_buf!(
+    rkchk_get_mod,
+    RKCHK_IOC_MAGIC,
+    RKCHK_GET_MOD_NR,
+    event::ioctl::LKM
+);
 
 impl Display for event::Events {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,7 +119,7 @@ impl Display for event::Events {
                 )
             }
             Self::TamperedMSR => write!(f, "An MSR (CR0 or CR4 or LSTAR) was tampered with"),
-            Self::StdioToSocket(info) => {
+            Self::StdioToSocket(_) => {
                 //write!(f, "Somone mapped stadanrd I/O to a socket\nThis is a common technique to open reverse shell\n\ttgid: {}", info.tgid)
                 write!(f, "Mapped I/O on a socket (mostly false positive)")
             }
@@ -116,7 +137,7 @@ impl Display for event::Events {
                 write!(
                     f,
                     "A process was executed with an suspicious environment variable:\n\tvariable: {}\n\tpath: {:?}", 
-                    info.env_type, 
+                    info.env_type,
                     // The string provided by the LKM are valid ASCII null terminated string
                     CStr::from_bytes_until_nul(&info.path).unwrap() ,
                 )
@@ -156,23 +177,21 @@ impl Display for event::EBPFFuncType {
     }
 }
 
-impl Display for StackEntry{
+impl Display for StackEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:x}", self.addr)?;
         if let Some(symbol) = &self.name {
             if let Ok(symbol) = CStr::from_bytes_until_nul(symbol) {
                 let symbol_demangled = demangle(symbol.to_str().unwrap());
-                write!(f, " : {} + {:x}",symbol_demangled, self.offset)?;
-            }
-            else {
+                write!(f, " : {} + {:x}", symbol_demangled, self.offset)?;
+            } else {
                 write!(f, " : {:?}", symbol)?;
             }
         }
         if let Some(module) = &self.modname {
             if let Ok(module) = CStr::from_bytes_until_nul(module) {
                 write!(f, " [{:?}]", module)?;
-            }
-            else {
+            } else {
                 write!(f, " [{:?}]", module)?;
             }
         }
@@ -185,12 +204,10 @@ impl Display for event::ioctl::LKM {
         if let Some(name) = &self.name {
             if let Ok(name) = CStr::from_bytes_until_nul(name) {
                 write!(f, "{:?}", name)?;
-            }
-            else {
+            } else {
                 write!(f, "{:?}", name)?;
             }
-        }
-        else {
+        } else {
             write!(f, "<hidden>")?;
         }
         if !self.linked_list {
@@ -206,17 +223,15 @@ impl Display for event::ioctl::InlineHookInfo {
         if let Some(symbol) = &self.name {
             if let Ok(symbol) = CStr::from_bytes_until_nul(symbol) {
                 let symbol_demangled = demangle(symbol.to_str().unwrap());
-                write!(f, " : {:?} + {:x}",symbol_demangled, self.offset)?;
-            }
-            else {
+                write!(f, " : {:?} + {:x}", symbol_demangled, self.offset)?;
+            } else {
                 write!(f, " : {:?}", symbol)?;
             }
         }
         if let Some(module) = &self.modname {
             if let Ok(module) = CStr::from_bytes_until_nul(module) {
                 write!(f, " [{:?}]", module)?;
-            }
-            else {
+            } else {
                 write!(f, " [{:?}]", module)?;
             }
         }
@@ -227,32 +242,6 @@ impl Display for event::ioctl::InlineHookInfo {
         write!(f, ">")?;
         Ok(())
     }
-}
-
-
-fn read_data<T>(trigger : impl FnOnce(&mut MaybeUninit<usize>) -> Result<usize>, next : impl Fn(&mut MaybeUninit<T>) -> Result<usize>) -> Result<Vec<T>> {
-    let mut n = MaybeUninit::uninit();
-
-    trigger(&mut n)?;
-
-    let n = unsafe {
-        n.assume_init()
-    };
-
-    let mut res = Vec::with_capacity(n);
-
-    let buf  = res.spare_capacity_mut();
-    for i in 0..n {
-        let tmp = buf.get_mut(i).unwrap(); // By the with_capacity guaranty we have enought element in buf
-        
-        next(tmp)?;
-    }
-
-    unsafe {
-        res.set_len(n);
-    }
-
-    Ok(res)
 }
 
 fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
@@ -300,7 +289,7 @@ fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
     }
 }
 
-fn check_ftrace_hook(fd: i32 ) -> std::io::Result<Option<Vec<String>>> {
+fn check_ftrace_hook(fd: i32) -> std::io::Result<Option<Vec<String>>> {
     // This file list all the traced functions using kernel hooks
     let content = fs::read_to_string("/sys/kernel/debug/tracing/enabled_functions")?;
 
@@ -308,17 +297,16 @@ fn check_ftrace_hook(fd: i32 ) -> std::io::Result<Option<Vec<String>>> {
 
     unsafe { rkchk_traced_list(fd, &mut rkchk_functions) }.unwrap();
 
-    let mut rkchk_function_vec : Vec<String> = Vec::new();
+    let mut rkchk_function_vec: Vec<String> = Vec::new();
 
     for fct in rkchk_functions {
         // It's a tab of 100 so there is a first element
         if *fct.get(0).unwrap() != 0 {
             let mut string_fct = String::from_utf8_lossy(&fct).into_owned();
-            string_fct.retain(|c| c!= '\0');
+            string_fct.retain(|c| c != '\0');
             rkchk_function_vec.push(string_fct);
         }
     }
-
 
     let mut res = Vec::new();
 
@@ -331,11 +319,9 @@ fn check_ftrace_hook(fd: i32 ) -> std::io::Result<Option<Vec<String>>> {
         }
     }
 
-
     if res.is_empty() {
         Ok(None)
-    }
-    else {
+    } else {
         Ok(Some(res))
     }
 }
@@ -349,6 +335,7 @@ where
     }
 }
 
+#[allow(unused)]
 struct LKM {
     events: Vec<event::Events>,
     name: Vec<u8>,
@@ -375,6 +362,7 @@ impl Threat for LKM {
     }
 }
 
+#[allow(unused)]
 struct Process {
     events: Vec<event::Events>,
     tgid: pid_t,
@@ -409,7 +397,7 @@ fn run_integrity_check(fd: i32) {
         }
     }
 
-    let mut n : usize = 0;
+    let mut n: usize = 0;
     unsafe {
         rkchk_refresh_mod(fd, &mut n as _).unwrap();
     }
@@ -425,15 +413,13 @@ fn run_integrity_check(fd: i32) {
     }
 }
 
-
 pub mod event;
 
 use event::ioctl::*;
 
-fn get_print_stacktrace(fd : i32, n : usize) {
+fn get_print_stacktrace(fd: i32, n: usize) {
     let mut vec = Vec::new();
     vec.resize(n, StackEntry::default());
-
 
     if let Err(_) | Ok(0) = unsafe { rkchk_get_stacktrace(fd, &mut vec) } {
         println!("Error getting stacktrace");
@@ -447,24 +433,23 @@ fn get_print_stacktrace(fd : i32, n : usize) {
     }
 }
 
-fn get_print_inline_hook(fd : i32) {
+fn get_print_inline_hook(fd: i32) {
     let mut hook = InlineHookInfo::default();
 
-    if let Err(err) = unsafe { rkchk_get_hook_inline(fd, &mut hook)} {
+    if let Err(err) = unsafe { rkchk_get_hook_inline(fd, &mut hook) } {
         println!("Error getting inline hook : {}", err);
     }
 
     println!("Inline hook detexted:\n\t{}", hook);
 }
 
-
 fn main() {
     let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
 
-    let term = Arc::new(AtomicBool::new(false));    
+    let term = Arc::new(AtomicBool::new(false));
 
     let term_thread = term.clone();
-   
+
     println!("Checking for hidden process");
     let suspect_pid = check_hidden_process(fd).unwrap();
     if let Some(pid_list) = suspect_pid {
@@ -481,7 +466,7 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term)).unwrap();
 
     let thread_handle = thread::spawn(move || {
-        while !term_thread.load(std::sync::atomic::Ordering::Relaxed) { 
+        while !term_thread.load(std::sync::atomic::Ordering::Relaxed) {
             let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
             run_integrity_check(fd);
             std::thread::sleep(Duration::from_secs(5));
@@ -492,13 +477,12 @@ fn main() {
     while !term.load(std::sync::atomic::Ordering::Relaxed) {
         let mut event = event::Events::NoEvent;
         unsafe { rkchk_read_event(fd, &mut event as _).unwrap() };
-        
+
         match event {
             event::Events::StdioToSocket(_) => (),
             event::Events::Stacktrace(n) => get_print_stacktrace(fd, n),
             event::Events::InlineHookDetected => get_print_inline_hook(fd),
             _ => println!("{}", event),
-
         };
     }
     thread_handle.join().unwrap();
