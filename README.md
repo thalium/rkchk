@@ -40,6 +40,7 @@ Precisly you need to activate :
 RUST
 FUNCTION_TRACER
 FPROBE
+BPF_SYSCALL
 ```
 
 (those are activated in most major distribution's kernel by default)
@@ -66,10 +67,15 @@ make LLVM=1 bindeb-pkg
 
 And then install the .deb generated.
 
-## Installing our tool 
+## Installing & running rkchk 
 
+A small script is available to automatically build the kernel module, install it and launch the user space program.
 
+You can launch the script with (without root privilege !):
 
+```
+sh run.sh
+```
 
 # Available checks
 
