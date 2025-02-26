@@ -339,19 +339,32 @@ impl MiscDevice for Communication {
                 Ok((core::mem::size_of::<[u8; event::SIZE_STRING]>() * nb) as _)
             }
             RKCHK_INTEG_ALL_NR => {
-                data.integrity_check.function_integ.check_functions()?;
+                let res = Ok(0);
 
-                data.integrity_check
-                    .syscall_integ
-                    .check_syscall_position()?;
+                if let Err(err) = data.integrity_check.function_integ.check_functions() {
+                    res = Err(err);
+                }
 
-                data.integrity_check.msr_integ.check_pinned_cr_bits()?;
-                data.integrity_check.msr_integ.check_msr_lstar()?;
+                if let Err(err) = data.integrity_check.syscall_integ.check_syscall_position() {
+                    res = Err(err);
+                }
 
-                data.integrity_check.cf_integ.check_custom_hook()?;
-                data.response.compare_page(&data.events, 0)?;
+                if let Err(err) = data.integrity_check.msr_integ.check_pinned_cr_bits() {
+                    res = Err(err);
+                }
 
-                Ok(0)
+                if let Err(err) = data.integrity_check.msr_integ.check_msr_lstar() {
+                    res = Err(err);
+                }
+
+                if let Err(err) = data.integrity_check.cf_integ.check_custom_hook() {
+                    res = Err(err);
+                }
+                if let Err(err) = data.response.compare_page(&data.events, 0) {
+                    res = Err(err);
+                }
+
+                res
             }
             RKCHK_READ_EVENT_NR => {
                 let mut writer = user_slice.writer();
@@ -431,25 +444,18 @@ impl kernel::Module for RootkitDetection {
     fn init(_module: &'static ThisModule) -> Result<Self> {
         pr_info!("Rootkit detection written in Rust\n");
 
-        pr_info!("Registering the device\n");
-
         let event_stack = EventStack::init()?;
 
-        pr_info!("Registering the device\n");
         // Setting up the probes
         let _probe = Probes::init(event_stack.clone())?;
 
-        pr_info!("Registering the device\n");
         let _integrity_check = Arc::new(IntegrityCheck::init(event_stack.clone())?, GFP_KERNEL)?;
 
-        pr_info!("Registering the device\n");
         let response = Arc::pin_init(Response::new(), GFP_KERNEL)?;
 
-        pr_info!("Registering the device\n");
         let address: usize = symbols_lookup_name(c_str!("__x64_sys_delete_module")) as _;
         response.add_copy(address)?;
 
-    
         pr_info!("We successfully copied the kernel page!");
 
         // Checks relative to the integrity (of text section, functions pointer, control registers...)
