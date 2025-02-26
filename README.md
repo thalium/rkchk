@@ -71,11 +71,17 @@ And then install the .deb generated.
 
 A small script is available to automatically build the kernel module, install it and launch the user space program.
 
-You can launch the script with (without root privilege !):
+You can launch the script with (run it without root privilege!):
 
 ```
 sh run.sh
 ```
+
+## Configuring
+
+The tool can generate a lot of noise and some feedbacks print a lot of information, you can select which event to display by changing the `user/src/main.rs` files. 
+
+The documentation on the effect of all the events is in `user/src/event.rs`.
 
 # Available checks
 
