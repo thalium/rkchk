@@ -49,6 +49,7 @@ const CR4_SMAP: u64 = 1 << 21;
 /// Jump
 const X86_OP_JMP: i32 = 0xE9;
 /// Breakpoint
+#[allow(dead_code)]
 const X86_OP_BP: i32 = 0xCC;
 
 /// Structure used to run integrity check on CPU's MSR
@@ -282,19 +283,12 @@ impl FunctionIntegrity {
 /// to see if their flow isn't hijacked
 pub struct CFIntegrity {
     events: Arc<EventStack>,
-    checked_function: KVec<&'static CStr>,
 }
 
 impl CFIntegrity {
     /// Create a new instance of the structure
     fn init(events: Arc<EventStack>) -> Result<Self> {
-        let mut checked_function = KVec::new();
-        checked_function.push(c_str!("ip_rcv"), GFP_KERNEL)?;
-        checked_function.push(c_str!("tcp4_seq_show"), GFP_KERNEL)?;
-        Ok(CFIntegrity {
-            checked_function,
-            events,
-        })
+        Ok(CFIntegrity { events })
     }
 
     /// Check the first instruction of the function "name" to see if it isn't hooked.
@@ -310,8 +304,12 @@ impl CFIntegrity {
             }
 
             // We filter out the static tracing methods handlers and the start function of the kernel
+            // And some function starting with a JUMP instruction
             if buffer.starts_with(c_str!("T__SCT__").as_bytes())
-                || buffer.starts_with(c_str!("T__static_call_text_start"))
+                || buffer.starts_with(c_str!("T__static_call_text_start").as_bytes())
+                || buffer.starts_with(c_str!("trcu_read_unlock").as_bytes())
+                || buffer.starts_with(c_str!("troot_dev_setup").as_bytes())
+                || buffer.starts_with(c_str!("tparse_root_device").as_bytes())
             {
                 return Ok(());
             }
@@ -329,13 +327,13 @@ impl CFIntegrity {
 
             if opcode == X86_OP_JMP {
                 let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
-                pr_alert!(
+                /*pr_alert!(
                     "Function : {:?} probably hooked using opcode {:#02x} at addr : {:x} and we have {:x}\n",
                     fct_name,
                     opcode,
                     addr,
                     tab[0]
-                );
+                );*/
                 let mut buf = [0 as u8; event::SIZE_STRING];
                 for (i, e) in buffer.iter().enumerate() {
                     let b = match buf.get_mut(i) {

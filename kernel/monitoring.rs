@@ -665,9 +665,9 @@ impl FprobeOperations for DoFilpOpen {
     type EntryData = Option<&'static CStr>;
 
     fn entry_handler(
-        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
-        entry_ip: usize,
-        ret_ip: usize,
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
         regs: &bindings::pt_regs,
         entry_data: Option<&mut Self::EntryData>,
     ) -> Option<()> {
@@ -690,9 +690,9 @@ impl FprobeOperations for DoFilpOpen {
         return None;
     }
     fn exit_handler(
-        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
-        entry_ip: usize,
-        ret_ip: usize,
+        _data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
+        _entry_ip: usize,
+        _ret_ip: usize,
         regs: &bindings::pt_regs,
         entry_data: Option<&mut Self::EntryData>,
     ) {

@@ -435,15 +435,21 @@ impl kernel::Module for RootkitDetection {
 
         let event_stack = EventStack::init()?;
 
+        pr_info!("Registering the device\n");
         // Setting up the probes
         let _probe = Probes::init(event_stack.clone())?;
 
+        pr_info!("Registering the device\n");
         let _integrity_check = Arc::new(IntegrityCheck::init(event_stack.clone())?, GFP_KERNEL)?;
 
+        pr_info!("Registering the device\n");
         let response = Arc::pin_init(Response::new(), GFP_KERNEL)?;
+
+        pr_info!("Registering the device\n");
         let address: usize = symbols_lookup_name(c_str!("__x64_sys_delete_module")) as _;
         response.add_copy(address)?;
 
+    
         pr_info!("We successfully copied the kernel page!");
 
         // Checks relative to the integrity (of text section, functions pointer, control registers...)

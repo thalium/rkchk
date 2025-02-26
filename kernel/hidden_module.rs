@@ -29,6 +29,7 @@ pub struct ModuleAddressIter {
 }
 
 impl ModuleAddressIter {
+    /// Create a new instance
     pub fn new() -> Self {
         ModuleAddressIter {
             // SAFETY: This function is always safe to call
@@ -130,6 +131,7 @@ impl Iterator for ModuleAddressIter {
     }
 }
 
+/// Implementation of the detection algorithm discussed in a Phrack article : https://phrack.org/issues/71/12#article
 pub fn detect_stray_struct_module() -> Result<KVec<*const kernel::bindings::module>> {
     let iter = ModuleAddressIter::new();
     let mut res = KVec::new();

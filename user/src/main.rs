@@ -264,11 +264,11 @@ fn check_hidden_process(fd: i32) -> std::io::Result<Option<Vec<pid_t>>> {
 
     let mut number_task: usize = 0;
 
-    unsafe { rkchk_number_task(fd, &mut number_task as *mut usize) }.unwrap();
+    unsafe { rkchk_number_task(fd, &mut number_task as *mut usize) }?;
 
     let mut pid_list = [0_i32; 300];
 
-    unsafe { rkchk_pid_list(fd, &mut pid_list) }.unwrap();
+    unsafe { rkchk_pid_list(fd, &mut pid_list) }?;
 
     for pid in pid_list {
         // The pid 0 exit in kernel but is not shown in the /proc
@@ -295,7 +295,7 @@ fn check_ftrace_hook(fd: i32) -> std::io::Result<Option<Vec<String>>> {
 
     let mut rkchk_functions = [[0_u8; event::SIZE_STRING]; 20];
 
-    unsafe { rkchk_traced_list(fd, &mut rkchk_functions) }.unwrap();
+    unsafe { rkchk_traced_list(fd, &mut rkchk_functions) }?;
 
     let mut rkchk_function_vec: Vec<String> = Vec::new();
 
@@ -382,14 +382,14 @@ impl Threat for Process {
     }
 }
 
-fn run_integrity_check(fd: i32) {
+fn run_integrity_check(fd: i32) -> std::io::Result<()> {
     unsafe {
         if let Err(err) = rkchk_run_all_integ(fd) {
             println!("Error running the integrity checks : {:?}", err);
         }
     }
 
-    let traced_functions = check_ftrace_hook(fd).unwrap();
+    let traced_functions = check_ftrace_hook(fd)?;
     if let Some(traced_function) = traced_functions {
         println!("Found traced functions:");
         for fct in traced_function {
@@ -399,7 +399,7 @@ fn run_integrity_check(fd: i32) {
 
     let mut n: usize = 0;
     unsafe {
-        rkchk_refresh_mod(fd, &mut n as _).unwrap();
+        rkchk_refresh_mod(fd, &mut n as _)?;
     }
     if n != 0 {
         println!("Printing list of module :");
@@ -407,10 +407,11 @@ fn run_integrity_check(fd: i32) {
 
     let mut vec = Vec::new();
     vec.resize(n, event::ioctl::LKM::default());
-    unsafe { rkchk_get_mod(fd, &mut vec).unwrap() };
+    unsafe { rkchk_get_mod(fd, &mut vec) }?;
     for e in vec {
         println!("  {}", e);
     }
+    Ok(())
 }
 
 pub mod event;
@@ -451,24 +452,28 @@ fn main() {
     let term_thread = term.clone();
 
     println!("Checking for hidden process");
-    let suspect_pid = check_hidden_process(fd).unwrap();
-    if let Some(pid_list) = suspect_pid {
-        println!("Found some suspect_pid : {:?}\n", pid_list);
-        for pid in pid_list {
-            let threat = Process {
-                events: Vec::new(),
-                tgid: pid as _,
-            };
-            threat.remove();
+    if let Ok(suspect_pid) = check_hidden_process(fd) {
+        if let Some(pid_list) = suspect_pid {
+            println!("Found some suspect_pid : {:?}\n", pid_list);
+            for pid in pid_list {
+                let threat = Process {
+                    events: Vec::new(),
+                    tgid: pid as _,
+                };
+                threat.remove();
+            }
         }
+    } else {
+        println!("Error while checking for hidden PID\n");
     }
-
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term)).unwrap();
 
     let thread_handle = thread::spawn(move || {
         while !term_thread.load(std::sync::atomic::Ordering::Relaxed) {
             let fd = fcntl::open("/dev/rkchk", fcntl::OFlag::O_RDWR, Mode::empty()).unwrap();
-            run_integrity_check(fd);
+            if let Err(err) = run_integrity_check(fd) {
+                println!("Error checking for integrity : {:?}\n", err);
+            }
             std::thread::sleep(Duration::from_secs(5));
         }
         nix::unistd::close(fd).unwrap();

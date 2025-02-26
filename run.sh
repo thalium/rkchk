@@ -3,7 +3,7 @@ rm *.o*
 rm *.ko
 rm *.mod*
 rm .*
-make LLVM=1 KDIR=../../linux-next
+make LLVM=1 KDIR=../../linux
 sudo rmmod rkchk
 sudo insmod rkchk.ko
 
