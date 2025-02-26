@@ -326,8 +326,8 @@ impl CFIntegrity {
             let opcode = diss.get_opcode()?;
 
             if opcode == X86_OP_JMP {
-                let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
-                /*pr_alert!(
+                /*let fct_name = core::ffi::CStr::from_bytes_until_nul(buffer);
+                pr_alert!(
                     "Function : {:?} probably hooked using opcode {:#02x} at addr : {:x} and we have {:x}\n",
                     fct_name,
                     opcode,
